@@ -4,6 +4,7 @@
 
 module Common.Codewords where
 
+import Control.Lens
 import Data.Aeson.TH
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
@@ -77,17 +78,19 @@ data Clue
 type Board = [Codeword]
 
 data RoomChatMessage
-  = RoomChatMessage { playerSpeaking :: Player
+  = RoomChatMessage { userSpeaking :: User
                     , chatMessage :: T.Text
                     }
+                    deriving Show
 
 data Room
-  = Room { roomChat :: [RoomChatMessage]
-         , roomName :: T.Text
-         , roomPassword :: Maybe T.Text
-         , roomPlayers :: NonEmpty User
-         , inGame :: Bool
+  = Room { _roomChat :: [RoomChatMessage]
+         , _roomName :: T.Text
+         , _roomPassword :: Maybe T.Text
+         , _roomPlayers :: NonEmpty User
+         , _inGame :: Bool
          }
+         deriving Show
 
 type Password = T.Text
 type Rooms = [Room]
@@ -98,6 +101,8 @@ deriveJSON defaultOptions ''RoomChatMessage
 deriveJSON defaultOptions ''Player
 deriveJSON defaultOptions ''PlayerRole
 deriveJSON defaultOptions ''Team
+
+makeLenses ''Room
 
 swapAtIndices :: Int -> Int -> [a] -> [a]
 swapAtIndices indexX indexY list = setAt indexY x $ setAt indexX y list

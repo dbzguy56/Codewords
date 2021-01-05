@@ -49,11 +49,13 @@ type CodewordsM t m = ( DomBuilder t m , PostBuild t m , TriggerEvent t m
 data View
   = SignIn
   | LoggedIn User LoggedInView
+  deriving Eq
 
 data LoggedInView
   = HomeView
   | RoomView Int
-
+  deriving Eq
+{-
 noStyle :: Style
 noStyle = ""
 
@@ -69,7 +71,7 @@ roomChatStyle = [ "background-color: lightgray"
 
 combineStyles :: [Style] -> Style
 combineStyles t = F.foldr (\x xs -> x <> ";" <> xs) "" t
--- theres prob a fold with fn? and should i be using another variant
+-}
 
 codeWordsSocket :: CodewordsM t m
   => Event t ClientMsg -> m (Event t ServerMsg)
@@ -90,7 +92,8 @@ showMsgs msg = do
 
 roomChatWidget :: CodewordsM t m => Dynamic t Room -> User -> m (Event t RoomChatMessage)
 roomChatWidget r u = do
-  elAttr "div" ("style" =: (combineStyles roomChatStyle)) $
+  elClass "div" "bg-gray-300 flex flex-col flex-grow break-all \
+    \ overflow-auto h-1/3 lg:h-full" $
     simpleList (fmap (reverse._roomChat) r) (\rChat -> do
       el "div" $ do
         let user = fmap userSpeaking rChat
@@ -98,36 +101,73 @@ roomChatWidget r u = do
         dynText ": "
         dynText $ fmap chatMessage rChat
       )
-  elClass "div" "flex" $ do
-    eventText <- inputTextBoxBtnWidget "Send" "flex: auto"
+  elClass "div" "flex flex-row" $ do
+    eventText <- inputTextBoxBtnWidget "Send" "width:85%"
     return $ fmap (RoomChatMessage u) eventText
+
+
+btnWidget :: CodewordsM t m => T.Text -> T.Text -> m (Event t ())
+btnWidget style t = do
+  (e, _)  <- elClass' "button" style $ text t
+  return $ domEvent Click e
 
 displayRoom :: CodewordsM t m => Int -> Dynamic t Room -> User
   -> m (Event t ClientMsg)
 displayRoom n r u = do
-  elClass "div" "flex flex-row" $ do
-    displayRoomUsers $ fmap _roomPlayers r
-    elClass "div" "flex-grow" $ do
-      dynText $ fmap (\room -> "Room name: " <> _roomName room) r
-      msgStream <- roomChatWidget r u
-      return $ fmap (SendRoomChatMsg n) msgStream
+  elClass "div" "flex flex-col h-screen" $ do
+    elClass "div" "flex justify-center bg-gray-700 xl:h-16 2xl:h-8 rounded \
+      \ lg:text-5xl" $
+      text "BEEG YOSHI"
+    elClass "div" "flex justify-center bg-gray-600 h-auto lg:text-3xl" $
+      text "Waiting on Blah to start the game"
+
+    elClass "div" "flex flex-col text-5xl md:flex-row h-full overflow-hidden lg:text-3xl" $ do
+      btn <- elClass "div" "flex flex-col flex-grow bg-gray-500 rounded" $ do
+        elClass "div" "flex" $ do
+          elDynClass "div" "p-1 flex-grow bg-gray-700 rounded-t" $ do
+            dynText $ fmap (\room -> "Room: " <> _roomName room) r
+            elClass "button" "ml-2 px-1 bg-gray-600 rounded-lg" $ text "Change"
+          elClass "div" "lg:px-10 2xl:px-3 bg-gray-600 rounded-full" $ text "?"
+
+        displayRoomUsers (fmap _roomAdmin r) (fmap _roomPlayers r)
+
+        elClass "div" "flex flex-row justify-between h-1/6" $ do
+          let btnStyles = "m-2 p-1 bg-gray-600 rounded-lg"
+          backBtn <- fmap ((<$) (LeaveRoom n)) $ btnWidget btnStyles "Back"
+          --startBtn <- btnWidget btnStyles "Start"
+          return backBtn
+
+      elClass "div" "flex flex-col lg:w-1/4" $ do
+        msgStream <- roomChatWidget r u
+        return $ leftmost [fmap (SendRoomChatMsg n) msgStream, btn]
 
 displayRoomCard :: CodewordsM t m => Dynamic t (Int, Room) -> m (Event t Int)
 displayRoomCard r = do
   (e, _) <- el' "div" $ dynText $ fmap (_roomName.snd) r
   return $ tag (current $ fmap fst r) $ domEvent Click e
 
-displayRoomUsers :: CodewordsM t m => Dynamic t (NonEmpty User) -> m ()
-displayRoomUsers users = elClass "div" "flex-grow" $ do
-  el "div" $ text "Users in room: "
-  simpleList (fmap NE.toList users) (\u -> el "div" $ dynText $ fmap name u)
+
+displayRoomUsers :: CodewordsM t m => Dynamic t User
+  -> Dynamic t (NonEmpty User) -> m ()
+displayRoomUsers admin users = elClass "div" "px-4 h-full" $ do
+  elClass "div" "flex justify-center py-2" $ text "Players"
+  elClass "div" "grid grid-cols-2 gap-4 px-2" $
+    simpleList (fmap (reverse.NE.toList) users) (\u -> do
+        let isAdmin = (==) <$> (fmap userID u) <*> (fmap userID admin)
+        let defaultStyle = "px-2 bg-gray-200 rounded"
+        elDynClass "div" (T.append <$> (defaultStyle) <*>
+          (fmap makeAdminStyle isAdmin)) $ dynText $ fmap name u
+      )
   return ()
+  where makeAdminStyle True  = " text-yellow-400"
+        makeAdminStyle False = ""
 
 roomsWidget :: CodewordsM t m => Event t (IntMap Room) -> Event t (Int, Room)
-  -> m (Dynamic t (IntMap Room))
-roomsWidget rList e =
+  -> Event t Int -> m (Dynamic t (IntMap Room))
+roomsWidget rList e deleteEvent =
   foldDyn ($) mempty $ leftmost [ fmap mappend rList
-  , fmap (\(i, r) -> insert i r) e]
+  , fmap (\(i, r) -> insert i r) e
+  , fmap delete deleteEvent]
 {-  (\(roomID, room) currentMap ->
     insert roomID room currentMap
   ) mempty e
@@ -140,32 +180,33 @@ roomListWidget rList = do
 
 
 inputTextBoxBtnWidget :: CodewordsM t m
-  => T.Text -> Style -> m (Event t T.Text)
+  => T.Text -> T.Text -> m (Event t T.Text)
 inputTextBoxBtnWidget btnText style = do
   inputTextBox <- inputElement $ def
-    & inputElementConfig_elementConfig
-    . elementConfig_initialAttributes
-    .~ ("style" =: style)
-  (e, _) <- el' "button" $ text btnText
+    & inputElementConfig_elementConfig . elementConfig_initialAttributes
+    .~ ("autofocus" =: "" <> "style" =: style )
+      -- Looks like works for a second?
+  (e, _) <- elClass' "button" "bg-gray-100" $ text btnText
   let val = _inputElement_value inputTextBox
       clicked = domEvent Click e
       enter = keypress Enter (_inputElement_element inputTextBox)
-
   return $ tag (current val) (leftmost [clicked, enter])
 
 signInWidget :: CodewordsM t m => m (Event t ClientMsg)
 signInWidget = do
-  eventText <- inputTextBoxBtnWidget "Choose this name" noStyle
-  return $ fmap CreateName eventText
+  elClass "div" "text-5xl" $ do
+    eventText <- inputTextBoxBtnWidget "Choose this name" ""
+    return $ fmap CreateName eventText
 
 homeViewWidget :: CodewordsM t m => Dynamic t (IntMap Room) -> User -> m (Event t ClientMsg)
 homeViewWidget rList user = do
   el "div" $ text $ "Welcome " <> name user <> " ID: " <> tShow (userID user)
-  e <- inputTextBoxBtnWidget "Create Room" noStyle
+  e <- inputTextBoxBtnWidget "Create Room" ""
   roomClicked <- roomListWidget rList
   return $ leftmost [fmap JoinRoom roomClicked, fmap (flip CreateRoom Nothing) e]
 
 changeView :: ServerMsg -> View -> View
+changeView (LeftRoom u) _ = LoggedIn u HomeView
 changeView (NameCreated u) _ = LoggedIn u HomeView
 changeView (RoomCreated roomID _) (LoggedIn u _) = LoggedIn u $ RoomView roomID
 changeView (RoomJoined roomID) (LoggedIn u _) = LoggedIn u $ RoomView roomID
@@ -190,9 +231,14 @@ frontend = Frontend
   { _frontend_head = do
       el "title" $ text "Codewords"
       -- <link href="https://unpkg.com/tailwindcss@^2/dist/tailwind.min.css" rel="stylesheet">
-      elAttr "link" ("href" =: "https://unpkg.com/tailwindcss@^2/dist/tailwind.min.css" <> "type" =: "text/css" <> "rel" =: "stylesheet") blank
-      elAttr "link" ("href" =: static @"main.css" <> "type" =: "text/css" <> "rel" =: "stylesheet") blank
-  , _frontend_body = mdo
+      elAttr "link" ("href" =: "https://unpkg.com/tailwindcss@^2/dist/tailwind.min.css"
+        <> "type" =: "text/css" <> "rel" =: "stylesheet") blank
+      elAttr "link" ("href" =: static @"main.css" <> "type" =: "text/css"
+        <> "rel" =: "stylesheet") blank
+      -- <meta name="viewport" content="width=device-width, initial-scale=1">
+      elAttr "meta" ("name" =: "viewport" <> "content" =: "width=device-width, \
+        \initial-scale=1") blank
+  , _frontend_body = elClass "div" "w-screen h-screen bg-gray-500" $ mdo
 
       {- Counter
       counter <- foldDyn (+) (0 :: Integer) $ leftmost [(1 <$ clickEvent), ((-1) <$ clickEventG)]
@@ -211,12 +257,14 @@ frontend = Frontend
         serverMsg <- codeWordsSocket clientMsg
 
         currentView <- foldDyn changeView SignIn serverMsg
-        newServerMsg <- dyn $ router roomList <$> currentView
+        currentView' <- holdUniqDyn currentView
+        newServerMsg <- dyn $ router roomList <$> currentView'
         clientMsg <- switchHold never newServerMsg
 
-        roomList <- roomsWidget (fmapMaybe (preview _RoomList) serverMsg) $
-          leftmost [fmapMaybe (preview _RoomChanged) serverMsg
-          , fmapMaybe (preview _RoomCreated) serverMsg]
+        roomList <- roomsWidget (fmapMaybe (preview _RoomList) serverMsg)
+          (leftmost [fmapMaybe (preview _RoomChanged) serverMsg
+          , fmapMaybe (preview _RoomCreated) serverMsg])
+          $ fmapMaybe (preview _RoomDeleted) serverMsg
         -- displays all rooms --simpleList (fmap elems roomList) displayRoomCard
         --showMsgs name
         return ()

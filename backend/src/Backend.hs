@@ -1,6 +1,7 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Backend where
 
@@ -17,7 +18,7 @@ import Safe
 
 import Data.Aeson
 import Data.IntMap as M
-import Data.List.NonEmpty ((<|))
+import Data.List.NonEmpty as NE ((<|), filter, fromList, nonEmpty)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 
@@ -28,9 +29,10 @@ import Network.WebSockets.Snap
 data ServerState
   = State { userIDCounter :: TVar Int
           , rooms :: TVar (IntMap Room)
-          , broadcast :: TChan (Int, Room)
+          , broadcast :: TChan ServerMsg
           }
 
+systemUser = User ("SYSTEM" :: T.Text) (-1)
 
 handleNewConnection :: Maybe User -> ServerState -> Connection -> IO ()
 handleNewConnection mUser state connection = do
@@ -89,11 +91,6 @@ handleWebsocket s p = do
   --sendClose fullConnection ("You are already dead" :: T.Text)
   return ()
 
-handleTChanComms :: Connection -> TChan (Int, Room) -> IO ()
-handleTChanComms c t = forever $ do
-  let send = sendTextData c.encode
-  (i, r) <- atomically $ readTChan t
-  send (RoomChanged i r)
 
 handleClientMsg :: ServerState -> Maybe User -> ClientMsg
   -> (ServerMsg -> IO ()) -> IO (Maybe User)
@@ -110,7 +107,7 @@ handleClientMsg state mUser cMsg send =
         Just u -> do
           let newRoom = makeNewRoom u name pass
           roomID <- atomically $ stateTVar (rooms state) (addRoom newRoom)
-          atomically $ writeTChan (broadcast state) (roomID, newRoom)
+          atomically $ writeTChan (broadcast state) (RoomChanged roomID newRoom)
           send (RoomCreated roomID newRoom)
         Nothing ->
           return ()
@@ -123,12 +120,29 @@ handleClientMsg state mUser cMsg send =
           case mRoom of
             Just r -> do
               broadcastMsgToRoom (rooms state) roomID state $
-                RoomChatMessage (User ("SYSTEM" :: T.Text) (-1)) (
+                RoomChatMessage systemUser (
                   (name u) <> " has joined the room."
-                  )
+                )
               send (RoomJoined roomID)
             Nothing ->
               return ()
+        Nothing ->
+          return ()
+      return mUser
+
+    LeaveRoom roomID -> do
+      case mUser of
+        Just u -> do
+          mRoom <- removeUserFromRoom (rooms state) roomID u
+          case mRoom of
+            Just r -> do
+              broadcastMsgToRoom (rooms state) roomID state $
+                RoomChatMessage systemUser (
+                  (name u) <> " has left the room."
+                )
+            Nothing ->
+              atomically $ writeTChan (broadcast state) (RoomDeleted roomID)
+          send (LeftRoom u)
         Nothing ->
           return ()
       return mUser
@@ -137,12 +151,42 @@ handleClientMsg state mUser cMsg send =
       broadcastMsgToRoom (rooms state) roomID state roomChatMsg
       return mUser
 
+
+handleTChanComms :: Connection -> TChan ServerMsg -> IO ()
+handleTChanComms c t = forever $ do
+  let send = sendTextData c.encode
+  s <- atomically $ readTChan t
+  send s
+
+
 appendUserToRoom :: TVar (IntMap Room) -> Int -> User
   -> IO (Maybe Room)
 appendUserToRoom rList rID u = atomically $ stateTVar rList $ \r ->
   let r' = adjust addUser rID r in
   (M.lookup rID r', r')
   where addUser = over roomPlayers (u <|)
+
+{-
+removeUserFromRoom :: TVar (IntMap Room) -> Int -> User
+  -> IO (Maybe Room)
+removeUserFromRoom rList rID u = atomically $ stateTVar rList $ \r -> do
+  let r' = adjust (removeUser) rID r in
+    (M.lookup rID r', r')
+  where poo = NE.filter (u /= )
+        removeUser = over roomPlayers (NE.fromList poo)
+-}
+removeUserFromRoom :: TVar (IntMap Room) -> Int -> User
+  -> IO (Maybe Room)
+removeUserFromRoom rList rID u = atomically $ stateTVar rList $ \r ->
+  let
+      oldMembers = fmap _roomPlayers $ M.lookup rID r
+      newMembers = (NE.nonEmpty . NE.filter (\newU -> userID u /= userID newU )) =<< oldMembers
+      r' =
+        case newMembers of
+          Just nm -> adjust (set roomPlayers nm) rID r
+          Nothing -> delete rID r
+  in
+  (M.lookup rID r', r')
 
 appendRoomChatMsg :: TVar (IntMap Room) -> Int
   -> RoomChatMessage -> IO (Maybe Room)
@@ -157,7 +201,7 @@ broadcastMsgToRoom rList rID state rChatMsg = do
   mRoom <- appendRoomChatMsg rList rID rChatMsg
   case mRoom of
     Just r ->
-      atomically $ writeTChan (broadcast state) (rID, r)
+      atomically $ writeTChan (broadcast state) (RoomChanged rID r)
     Nothing ->
       return ()
 

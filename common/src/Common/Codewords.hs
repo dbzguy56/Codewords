@@ -24,7 +24,7 @@ data User
   = User { name :: T.Text
          , userID :: Int
          }
-  deriving Show
+  deriving (Show, Eq)
 
 data GameState
   = GameState { currentTurn :: Team
@@ -84,7 +84,8 @@ data RoomChatMessage
                     deriving Show
 
 data Room
-  = Room { _roomChat :: [RoomChatMessage]
+  = Room { _roomAdmin :: User
+         , _roomChat :: [RoomChatMessage]
          , _roomName :: T.Text
          , _roomPassword :: Maybe T.Text
          , _roomPlayers :: NonEmpty User
@@ -116,7 +117,7 @@ makePlayer :: PlayerRole -> Team -> User -> Player
 makePlayer role team user = Player role team user
 
 makeNewRoom :: User -> T.Text -> Maybe Password -> Room
-makeNewRoom user name pass = Room [] name pass (pure user) False
+makeNewRoom user name pass = Room user [] name pass (pure user) False
 
 randomizeList :: Show a => [a] -> IO [a]
 randomizeList !board = swapRandom board 99

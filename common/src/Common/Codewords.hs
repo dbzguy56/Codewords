@@ -1,5 +1,6 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TemplateHaskell #-}
 
 module Common.Codewords where
@@ -89,7 +90,7 @@ data Room
          , _roomName :: T.Text
          , _roomPassword :: Maybe T.Text
          , _roomPlayers :: NonEmpty User
-         , _inGame :: Bool
+         , _roomGameState :: Maybe GameState
          }
          deriving Show
 
@@ -102,8 +103,18 @@ deriveJSON defaultOptions ''RoomChatMessage
 deriveJSON defaultOptions ''Player
 deriveJSON defaultOptions ''PlayerRole
 deriveJSON defaultOptions ''Team
+deriveJSON defaultOptions ''GameState
+deriveJSON defaultOptions ''Codeword
+deriveJSON defaultOptions ''Ownership
 
 makeLenses ''Room
+
+tryStartGame :: User -> GameState -> Room -> Room
+tryStartGame u gs r@Room{..}
+  | isAdmin = r {_roomGameState = Just gs}
+  | otherwise = r
+  where isAdmin = userID u == userID _roomAdmin
+
 
 swapAtIndices :: Int -> Int -> [a] -> [a]
 swapAtIndices indexX indexY list = setAt indexY x $ setAt indexX y list
@@ -117,7 +128,7 @@ makePlayer :: PlayerRole -> Team -> User -> Player
 makePlayer role team user = Player role team user
 
 makeNewRoom :: User -> T.Text -> Maybe Password -> Room
-makeNewRoom user name pass = Room user [] name pass (pure user) False
+makeNewRoom user name pass = Room user [] name pass (pure user) Nothing
 
 randomizeList :: Show a => [a] -> IO [a]
 randomizeList !board = swapRandom board 99
@@ -146,8 +157,8 @@ assignOwnership n firstTurn = do
     where f Blue = (9, 8)
           f Red  = (8, 9)
 
-newGame :: [User] -> IO GameState
-newGame p = do
+startNewGame :: [User] -> IO GameState
+startNewGame p = do
   players <- randomizeList p
 
   let blueSpeaker = map (makePlayer Speaker Blue) $ take 1 players

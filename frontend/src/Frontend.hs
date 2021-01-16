@@ -55,23 +55,7 @@ data LoggedInView
   = HomeView
   | RoomView Int
   deriving Eq
-{-
-noStyle :: Style
-noStyle = ""
 
-type Style = T.Text
-
-roomChatStyle :: [Style]
-roomChatStyle = [ "background-color: lightgray"
-  , "border-top-left-radius: 10px"
-  , "border-top-right-radius: 10px"
-  , "font-style: italic"
-  , "min-height: 4em"
-  , "padding: 10px" ]
-
-combineStyles :: [Style] -> Style
-combineStyles t = F.foldr (\x xs -> x <> ";" <> xs) "" t
--}
 
 codeWordsSocket :: CodewordsM t m
   => Event t ClientMsg -> m (Event t ServerMsg)
@@ -115,11 +99,18 @@ displayRoom :: CodewordsM t m => Int -> Dynamic t Room -> User
   -> m (Event t ClientMsg)
 displayRoom n r u = do
   elClass "div" "flex flex-col h-screen" $ do
-    elClass "div" "flex justify-center bg-gray-700 xl:h-16 2xl:h-8 rounded \
-      \ lg:text-5xl" $
-      text "BEEG YOSHI"
-    elClass "div" "flex justify-center bg-gray-600 h-auto lg:text-3xl" $
-      text "Waiting on Blah to start the game"
+    let roomAdmin = fmap _roomAdmin r
+    let adminStatus = isUserAdmin roomAdmin (return u)
+    elClass "div" "flex justify-center bg-gray-700 xl:h-16 \
+      \ 2xl:h-8 rounded lg:text-5xl" $
+      text "GET UR BEEG YOSHI HERE"
+    elDynClass "div" "flex whitespace-pre-wrap \
+      \ justify-center bg-gray-600 h-auto lg:text-3xl" $ do
+      -- How would Sky do this
+      let adminName = fmap name roomAdmin
+      text "Waiting on "
+      elDynClass "span" "text-yellow-300" $ dynText adminName
+      text " to start the game"
 
     elClass "div" "flex flex-col text-5xl md:flex-row h-full overflow-hidden lg:text-3xl" $ do
       btn <- elClass "div" "flex flex-col flex-grow bg-gray-500 rounded" $ do
@@ -129,17 +120,34 @@ displayRoom n r u = do
             elClass "button" "ml-2 px-1 bg-gray-600 rounded-lg" $ text "Change"
           elClass "div" "lg:px-10 2xl:px-3 bg-gray-600 rounded-full" $ text "?"
 
-        displayRoomUsers (fmap _roomAdmin r) (fmap _roomPlayers r)
+        displayRoomUsers roomAdmin (fmap _roomPlayers r)
 
         elClass "div" "flex flex-row justify-between h-1/6" $ do
           let btnStyles = "m-2 p-1 bg-gray-600 rounded-lg"
-          backBtn <- fmap ((<$) (LeaveRoom n)) $ btnWidget btnStyles "Back"
-          --startBtn <- btnWidget btnStyles "Start"
-          return backBtn
+          backBtn <- btnWidget btnStyles "Back"
+
+          startBtn <- displayIfAdmin adminStatus
+            (btnWidget btnStyles "Start") (return never)
+          startBtn' <- switchHold never startBtn
+
+          return $ leftmost [ LeaveRoom n <$ backBtn
+            , StartGame n <$ startBtn']
 
       elClass "div" "flex flex-col lg:w-1/4" $ do
         msgStream <- roomChatWidget r u
         return $ leftmost [fmap (SendRoomChatMsg n) msgStream, btn]
+
+isUserAdmin :: Reflex t => Dynamic t User
+  -> Dynamic t User -> Dynamic t Bool
+isUserAdmin admin u = (==) <$> (fmap userID u) <*> (fmap userID admin)
+
+displayIfAdmin :: CodewordsM t m => Dynamic t Bool -> m b -> m b
+  -> m (Event t b)
+displayIfAdmin adminStatus adminAction defAction
+  = dyn $ fmap doFn adminStatus
+  where doFn False = defAction
+        doFn True  = adminAction
+
 
 displayRoomCard :: CodewordsM t m => Dynamic t (Int, Room) -> m (Event t Int)
 displayRoomCard r = do
@@ -153,13 +161,13 @@ displayRoomUsers admin users = elClass "div" "px-4 h-full" $ do
   elClass "div" "flex justify-center py-2" $ text "Players"
   elClass "div" "grid grid-cols-2 gap-4 px-2" $
     simpleList (fmap (reverse.NE.toList) users) (\u -> do
-        let isAdmin = (==) <$> (fmap userID u) <*> (fmap userID admin)
-        let defaultStyle = "px-2 bg-gray-200 rounded"
+        let adminStatus = isUserAdmin admin u
+        let defaultStyle = "px-2 bg-gray-400 rounded"
         elDynClass "div" (T.append <$> (defaultStyle) <*>
-          (fmap makeAdminStyle isAdmin)) $ dynText $ fmap name u
+          (fmap makeAdminStyle adminStatus)) $ dynText $ fmap name u
       )
   return ()
-  where makeAdminStyle True  = " text-yellow-400"
+  where makeAdminStyle True  = " text-yellow-300"
         makeAdminStyle False = ""
 
 roomsWidget :: CodewordsM t m => Event t (IntMap Room) -> Event t (Int, Room)

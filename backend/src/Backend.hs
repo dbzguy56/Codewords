@@ -18,7 +18,7 @@ import Safe
 
 import Data.Aeson
 import Data.IntMap as M
-import Data.List.NonEmpty as NE ((<|), filter, fromList, nonEmpty)
+import Data.List.NonEmpty as NE ((<|), filter, fromList, nonEmpty, toList)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as T
 
@@ -42,39 +42,7 @@ handleNewConnection mUser state connection = do
     Just decodedMsg -> do
       newMUser <- handleClientMsg state mUser decodedMsg send
       handleNewConnection newMUser state connection
-  {-    case decodedMsg of
-        CreateName name -> do
-          newID <- nextUserID (userIDCounter state)
-          let newUser = User name newID
-          send (NameCreated newUser)
-          handleNewConnection (Just newUser) state connection
 
-        CreateRoom name pass -> do
-          case mUser of
-            Just u -> do
-              let newRoom = makeNewRoom u name pass
-              roomID <- atomically $ stateTVar (rooms state) (addRoom newRoom)
-              atomically $ writeTChan (broadcast state) (roomID, newRoom)
-              send (RoomCreated roomID newRoom)
-            Nothing ->
-              return ()
-
-          handleNewConnection mUser state connection
-
-        JoinRoom roomID -> do --TODO: add user to room, send update to broadcast channel
-          send (RoomJoined roomID)
-          handleNewConnection mUser state connection
-
-        SendRoomChatMsg roomID roomChatMsg ->
-          mRoom <- appendRoomChatMsg (rooms state) roomID roomChatMsg
-          case mRoom of
-            Just r ->
-              atomically $ writeTChan (broadcast state) (roomID, r)
-            Nothing ->
-              return ()
-
-          handleNewConnection mUser state connection
-          -}
     _  ->
       handleNewConnection mUser state connection
 
@@ -151,13 +119,45 @@ handleClientMsg state mUser cMsg send =
       broadcastMsgToRoom (rooms state) roomID state roomChatMsg
       return mUser
 
+    StartGame roomID -> do
+      case mUser of
+        Just u -> do
+          let gs = GameState Blue [] [] False
+          mRoom <- tryFnOnRoom (rooms state) roomID
+            (tryStartGame u gs)
+
+          case mRoom of
+            Just r -> do
+              broadcastMsgToRoom (rooms state) roomID state $
+                RoomChatMessage systemUser $
+                  (name u) <> " has started the game."
+
+              newGame <- startNewGame $ NE.toList $ _roomPlayers r
+
+              return ()
+
+            Nothing ->
+              return ()
+        Nothing ->
+          return ()
+      return mUser
+
+tryFnOnRoom :: TVar (IntMap Room) -> Int
+  -> (Room -> Room) -> IO (Maybe Room)
+tryFnOnRoom rList rID fn = do
+    roomList <- readTVarIO rList
+    roomExist $ M.lookup rID roomList
+  where roomExist Nothing = return Nothing
+        roomExist (Just _) = atomically $ stateTVar rList $ \r ->
+          let r' = adjust fn rID r in
+          (M.lookup rID r' , r')
+
 
 handleTChanComms :: Connection -> TChan ServerMsg -> IO ()
 handleTChanComms c t = forever $ do
   let send = sendTextData c.encode
   s <- atomically $ readTChan t
   send s
-
 
 appendUserToRoom :: TVar (IntMap Room) -> Int -> User
   -> IO (Maybe Room)
@@ -166,15 +166,6 @@ appendUserToRoom rList rID u = atomically $ stateTVar rList $ \r ->
   (M.lookup rID r', r')
   where addUser = over roomPlayers (u <|)
 
-{-
-removeUserFromRoom :: TVar (IntMap Room) -> Int -> User
-  -> IO (Maybe Room)
-removeUserFromRoom rList rID u = atomically $ stateTVar rList $ \r -> do
-  let r' = adjust (removeUser) rID r in
-    (M.lookup rID r', r')
-  where poo = NE.filter (u /= )
-        removeUser = over roomPlayers (NE.fromList poo)
--}
 removeUserFromRoom :: TVar (IntMap Room) -> Int -> User
   -> IO (Maybe Room)
 removeUserFromRoom rList rID u = atomically $ stateTVar rList $ \r ->
@@ -204,7 +195,6 @@ broadcastMsgToRoom rList rID state rChatMsg = do
       atomically $ writeTChan (broadcast state) (RoomChanged rID r)
     Nothing ->
       return ()
-
 
 nextUserID :: TVar Int -> IO Int
 nextUserID a = atomically $ stateTVar a $ \c -> (c, c + 1)

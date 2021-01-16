@@ -15,9 +15,11 @@ data ClientMsg
   | SendRoomChatMsg Int RoomChatMessage
   | JoinRoom Int
   | LeaveRoom Int
+  | StartGame Int
 
 data ServerMsg
-  = NameCreated User
+  = GameStarted Int
+  | NameCreated User
   | RoomCreated Int Room
   | RoomChanged Int Room
   | RoomDeleted Int

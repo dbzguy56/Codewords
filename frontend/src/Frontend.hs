@@ -17,7 +17,8 @@ import Control.Lens
 import Control.Monad
 import Control.Monad.Fix
 import Control.Monad.IO.Class
-import Data.IntMap
+import Data.IntMap (IntMap, insert, delete)
+
 import Data.List.NonEmpty (NonEmpty)
 import qualified Data.Foldable as F
 import qualified Data.IntMap as M
@@ -53,9 +54,13 @@ data View
 
 data LoggedInView
   = HomeView
-  | RoomView Int
+  | RoomView Int RoomStateView
   deriving Eq
 
+data RoomStateView
+  = LobbyView
+  | GameView
+  deriving Eq
 
 codeWordsSocket :: CodewordsM t m
   => Event t ClientMsg -> m (Event t ServerMsg)
@@ -74,21 +79,120 @@ showMsgs msg = do
   simpleList msgs $ el "div".dynText
   return ()
 
-roomChatWidget :: CodewordsM t m => Dynamic t Room -> User -> m (Event t RoomChatMessage)
+roomChatWidget :: CodewordsM t m => Dynamic t Room -> User
+  -> m (Event t RoomChatMessage)
 roomChatWidget r u = do
-  elClass "div" "bg-gray-300 flex flex-col flex-grow break-all \
-    \ overflow-auto h-1/3 lg:h-full" $
-    simpleList (fmap (reverse._roomChat) r) (\rChat -> do
-      el "div" $ do
-        let user = fmap userSpeaking rChat
-        elClass "span" "text-red-600" $ dynText $ fmap name user
-        dynText ": "
-        dynText $ fmap chatMessage rChat
-      )
+  {-
+  data Dynamic t :: * -> *
+    A container for a value that can change over time and
+    allows notifications on changes. Basically a combination
+    of a Behavior and an Event, with a rule that the
+    Behavior will change if and only if the Event fires.
+
+  data Behavior t :: * -> *
+    A container for a value that can change over time.
+    Behaviors can be sampled at will, but it is not possible
+    to be notified when they change.
+
+  data Event t :: * -> *
+    A stream of occurrences. During any given frame, an
+    Event is either occurring or not occurring; if it is
+    occurring, it will contain a value of the given type
+    (its "occurrence type")
+  -}
+  elClass "div" "bg-gray-300 flex flex-col-reverse h-1/3 lg:h-full overflow-auto" $
+    elClass "div" "flex flex-col break-all \
+      \ " $
+      simpleList (fmap (reverse._roomChat) r) (\rChat -> do
+        el "div" $ do
+          let user = fmap userSpeaking rChat
+          elClass "span" "text-red-600" $ dynText $ fmap _name user
+          dynText ": "
+          dynText $ fmap chatMessage rChat
+        )
   elClass "div" "flex flex-row" $ do
     eventText <- inputTextBoxBtnWidget "Send" "width:85%"
     return $ fmap (RoomChatMessage u) eventText
 
+styleCard :: Codeword -> PlayerRole -> [Char]
+styleCard (Codeword _ o r) pr
+    | r = (++) (color o) "600"
+    | pr == Speaker = (++) (color o) "200"
+    | otherwise = "bg-gray-600"
+    where color Bystander = "bg-yellow-"
+          color Killer = "bg-gray-"
+          color (TeamOwned Red) = "bg-red-"
+          color (TeamOwned Blue) = "bg-blue-"
+
+
+displayTopBar :: CodewordsM t m => User -> Room -> m ()
+displayTopBar u r = do
+  elClass "div" "flex justify-between" $ do
+    case (_roomGameState r) of
+      Just gs -> do
+        elClass "div" "" $ do
+          text "Current Turn: "
+          elClass "span" (teamColor $ _currentTurn gs) $
+            text $ tShow $ _currentTurn gs
+
+        let gb = _gameBoard gs
+            currentPlayer = getPlayer u gs
+
+        case currentPlayer of
+          Just p -> do
+            elClass "div" "" $ do
+              text "Your Role: "
+              elClass "span" (teamColor $ _team p) $
+                text $ tShow $ _team p
+              el "span" $ text $ T.pack $ "'s " ++ (show $ _role p)
+
+          Nothing ->
+            el "span" $ text "Couldnt find player"
+
+      Nothing ->
+        el "span" $ text "Gamestate does not exist:("
+
+  where teamColor Red = "text-red-400"
+        teamColor Blue = "text-blue-400"
+
+getPlayer :: User -> GameState
+  -> Maybe Player
+getPlayer u gs = ps ^? ix (_userID u)
+  where ps = _players gs
+
+
+displayGameBoard :: CodewordsM t m => User -> Room -> m ()
+displayGameBoard u r = do
+  case (_roomGameState r) of
+    Just gs -> do
+      let gb = _gameBoard gs
+          currentPlayer = getPlayer u gs
+
+      case currentPlayer of
+        Just p ->
+          elClass "div" "grid grid-cols-5 gap-4 p-4 h-full" $ do
+            F.forM_ gb $ \c -> do
+              let s = "p-4 flex justify-center rounded-lg items-center"
+              elClass "div" (T.pack $ s ++ " " ++ styleCard c (_role p))
+                $ text $ _word c
+
+        Nothing ->
+          el "div" $ text "Current player's role does not exist."
+
+    Nothing ->
+      el "div" $ text "Game could not start since \
+        \ gamestate does not exist."
+
+
+
+gameBoardWidget :: CodewordsM t m => Dynamic t Room -> User -> m (Event t ())
+gameBoardWidget r u = do
+  dyn_ $ displayTopBar u <$> r
+  dyn_ $ displayGameBoard u <$> r
+  b <- elClass "div" "flex" $ do
+    backBtn <- btnWidget "bg-gray-600" "Leave"
+    return backBtn
+  return b
 
 btnWidget :: CodewordsM t m => T.Text -> T.Text -> m (Event t ())
 btnWidget style t = do
@@ -96,8 +200,8 @@ btnWidget style t = do
   return $ domEvent Click e
 
 displayRoom :: CodewordsM t m => Int -> Dynamic t Room -> User
-  -> m (Event t ClientMsg)
-displayRoom n r u = do
+  -> RoomStateView -> m (Event t ClientMsg)
+displayRoom n r u v = do
   elClass "div" "flex flex-col h-screen" $ do
     let roomAdmin = fmap _roomAdmin r
     let adminStatus = isUserAdmin roomAdmin (return u)
@@ -107,39 +211,46 @@ displayRoom n r u = do
     elDynClass "div" "flex whitespace-pre-wrap \
       \ justify-center bg-gray-600 h-auto lg:text-3xl" $ do
       -- How would Sky do this
-      let adminName = fmap name roomAdmin
+      let adminName = fmap _name roomAdmin
       text "Waiting on "
       elDynClass "span" "text-yellow-300" $ dynText adminName
       text " to start the game"
 
     elClass "div" "flex flex-col text-5xl md:flex-row h-full overflow-hidden lg:text-3xl" $ do
-      btn <- elClass "div" "flex flex-col flex-grow bg-gray-500 rounded" $ do
-        elClass "div" "flex" $ do
-          elDynClass "div" "p-1 flex-grow bg-gray-700 rounded-t" $ do
-            dynText $ fmap (\room -> "Room: " <> _roomName room) r
-            elClass "button" "ml-2 px-1 bg-gray-600 rounded-lg" $ text "Change"
-          elClass "div" "lg:px-10 2xl:px-3 bg-gray-600 rounded-full" $ text "?"
+      btn <- elClass "div" "flex flex-col flex-grow bg-gray-500 rounded h-full" $ do
+        case v of
+          LobbyView -> do
+            elClass "div" "flex" $ do
+              elDynClass "div" "p-1 flex-grow bg-gray-700 rounded-t" $ do
+                dynText $ fmap (\room -> "Room: " <> _roomName room) r
+                elClass "button" "ml-2 px-1 bg-gray-600 rounded-lg" $ text "Change"
+              elClass "div" "lg:px-10 2xl:px-3 bg-gray-600 rounded-full" $ text "?"
 
-        displayRoomUsers roomAdmin (fmap _roomPlayers r)
+            displayRoomUsers roomAdmin (fmap _roomPlayers r)
 
-        elClass "div" "flex flex-row justify-between h-1/6" $ do
-          let btnStyles = "m-2 p-1 bg-gray-600 rounded-lg"
-          backBtn <- btnWidget btnStyles "Back"
+            elClass "div" "flex flex-row justify-between h-1/6" $ do
+              let btnStyles = "m-2 p-1 bg-gray-600 rounded-lg"
+              backBtn <- btnWidget btnStyles "Leave"
 
-          startBtn <- displayIfAdmin adminStatus
-            (btnWidget btnStyles "Start") (return never)
-          startBtn' <- switchHold never startBtn
+              startBtn <- displayIfAdmin adminStatus
+                (btnWidget btnStyles "Start") (return never)
+              startBtn' <- switchHold never startBtn
 
-          return $ leftmost [ LeaveRoom n <$ backBtn
-            , StartGame n <$ startBtn']
+              return $ leftmost [ LeaveRoom n <$ backBtn
+                , StartGame n <$ startBtn']
 
-      elClass "div" "flex flex-col lg:w-1/4" $ do
+          GameView -> do
+            backBtn <- gameBoardWidget r u
+            return $ LeaveRoom n <$ backBtn
+
+      elClass "div" "flex flex-col h-full lg:w-1/4" $ do
+        --TODO: Chat doesnt start at top
         msgStream <- roomChatWidget r u
         return $ leftmost [fmap (SendRoomChatMsg n) msgStream, btn]
 
 isUserAdmin :: Reflex t => Dynamic t User
   -> Dynamic t User -> Dynamic t Bool
-isUserAdmin admin u = (==) <$> (fmap userID u) <*> (fmap userID admin)
+isUserAdmin admin u = (==) <$> (fmap _userID u) <*> (fmap _userID admin)
 
 displayIfAdmin :: CodewordsM t m => Dynamic t Bool -> m b -> m b
   -> m (Event t b)
@@ -164,7 +275,7 @@ displayRoomUsers admin users = elClass "div" "px-4 h-full" $ do
         let adminStatus = isUserAdmin admin u
         let defaultStyle = "px-2 bg-gray-400 rounded"
         elDynClass "div" (T.append <$> (defaultStyle) <*>
-          (fmap makeAdminStyle adminStatus)) $ dynText $ fmap name u
+          (fmap makeAdminStyle adminStatus)) $ dynText $ fmap _name u
       )
   return ()
   where makeAdminStyle True  = " text-yellow-300"
@@ -189,16 +300,18 @@ roomListWidget rList = do
 
 inputTextBoxBtnWidget :: CodewordsM t m
   => T.Text -> T.Text -> m (Event t T.Text)
-inputTextBoxBtnWidget btnText style = do
+inputTextBoxBtnWidget btnText style = mdo
   inputTextBox <- inputElement $ def
     & inputElementConfig_elementConfig . elementConfig_initialAttributes
     .~ ("autofocus" =: "" <> "style" =: style )
-      -- Looks like works for a second?
+    & inputElementConfig_setValue .~ ("" <$ send)
+
   (e, _) <- elClass' "button" "bg-gray-100" $ text btnText
-  let val = _inputElement_value inputTextBox
-      clicked = domEvent Click e
+  let clicked = domEvent Click e
       enter = keypress Enter (_inputElement_element inputTextBox)
-  return $ tag (current val) (leftmost [clicked, enter])
+      send = leftmost [clicked, enter]
+      val = _inputElement_value inputTextBox
+  return $ tag (current val) send
 
 signInWidget :: CodewordsM t m => m (Event t ClientMsg)
 signInWidget = do
@@ -208,26 +321,28 @@ signInWidget = do
 
 homeViewWidget :: CodewordsM t m => Dynamic t (IntMap Room) -> User -> m (Event t ClientMsg)
 homeViewWidget rList user = do
-  el "div" $ text $ "Welcome " <> name user <> " ID: " <> tShow (userID user)
+  el "div" $ text $ "Welcome " <> _name user <> " ID: " <> tShow (_userID user)
   e <- inputTextBoxBtnWidget "Create Room" ""
   roomClicked <- roomListWidget rList
   return $ leftmost [fmap JoinRoom roomClicked, fmap (flip CreateRoom Nothing) e]
 
 changeView :: ServerMsg -> View -> View
+changeView (GameStarted rID) (LoggedIn u _) = LoggedIn u $ RoomView rID GameView
 changeView (LeftRoom u) _ = LoggedIn u HomeView
 changeView (NameCreated u) _ = LoggedIn u HomeView
-changeView (RoomCreated roomID _) (LoggedIn u _) = LoggedIn u $ RoomView roomID
-changeView (RoomJoined roomID) (LoggedIn u _) = LoggedIn u $ RoomView roomID
+changeView (RoomCreated rID _) (LoggedIn u _) = LoggedIn u $ RoomView rID LobbyView
+-- TODO: Allow user to join mid game possibly?
+changeView (RoomJoined rID) (LoggedIn u _) = LoggedIn u $ RoomView rID LobbyView
 changeView _ v = v
 
 router :: CodewordsM t m => Dynamic t (IntMap Room) -> View -> m (Event t ClientMsg)
 router _ SignIn = signInWidget
 router r (LoggedIn u HomeView) = homeViewWidget r u
-router roomList (LoggedIn u (RoomView n)) = do
+router roomList (LoggedIn u (RoomView n v)) = do
   let currentRoom = M.lookup n <$> roomList
   currentRoom' <- maybeDyn currentRoom
   clientMsg <- dyn $ ffor currentRoom' $ \case
-    Just r -> displayRoom n r u
+    Just r -> displayRoom n r u v
     Nothing -> text "Room does not exist" >> return never
   switchHold never clientMsg
 

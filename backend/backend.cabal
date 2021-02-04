@@ -16,7 +16,7 @@ library
                , websockets-snap
   exposed-modules:
     Backend
-  ghc-options: -Wall -Wredundant-constraints -Wincomplete-uni-patterns -Wincomplete-record-updates -O
+  ghc-options: -Wall -fno-warn-unused-do-bind -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wpartial-fields -Wredundant-constraints -O
 
 executable backend
   main-is: main.hs

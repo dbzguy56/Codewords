@@ -7,10 +7,12 @@ module Common.Codewords where
 
 import Control.Lens
 import Data.Aeson.TH
+import Data.Aeson.Types (FromJSONKey, ToJSONKey)
 import qualified Data.Text as T
-import qualified Data.Text.Encoding as T
 import Data.List.Index
 import Data.List.NonEmpty (NonEmpty)
+import Data.Map (Map)
+import qualified Data.Map as Map (empty, insert)
 
 import System.Random
 
@@ -23,16 +25,27 @@ testWords = ["Apple", "Blue", "Code", "Dart", "Ear", "Fart", "Green"
 
 data User
   = User { _name :: T.Text
-         , _userID :: Int
+         , _userID :: UserID
          }
   deriving (Eq, Show)
 
-type Board = [Codeword]
+instance Eq UserID where
+  (==) (UserID a) (UserID b) = a == b
+
+instance Show UserID where
+  show (UserID a) = show a
+
+instance Ord UserID where
+  (<=) (UserID a) (UserID a') = (<=) a a'
+
+instance FromJSONKey UserID
+
+instance ToJSONKey UserID
 
 data GameState
   = GameState { _currentTurn :: Team
               , _gameBoard :: Board
-              , _players :: [Player]
+              , _players :: Map UserID Player
               , _winner :: Bool
               }
   deriving (Eq, Show)
@@ -86,6 +99,7 @@ data RoomChatMessage
                     }
                     deriving (Eq, Show)
 
+--TODO: Limit what the front end can see
 data Room
   = Room { _roomAdmin :: User
          , _roomChat :: [RoomChatMessage]
@@ -96,10 +110,13 @@ data Room
          }
          deriving (Eq, Show)
 
+newtype UserID = UserID Int
+type Board = [Codeword]
 type Password = T.Text
 type Rooms = [Room]
 
 deriveJSON defaultOptions ''User
+deriveJSON defaultOptions ''UserID
 deriveJSON defaultOptions ''Room
 deriveJSON defaultOptions ''RoomChatMessage
 deriveJSON defaultOptions ''Player
@@ -129,16 +146,20 @@ swapAtIndices indexX indexY list = setAt indexY x $ setAt indexX y list
         y = list !! indexY
 
 makeCodeword :: Ownership -> T.Text -> Codeword
-makeCodeword owner w = Codeword w owner False
+makeCodeword o w = Codeword w o False
 
 makePlayer :: PlayerRole -> Team -> User -> Player
-makePlayer role team user = Player role team user
+makePlayer r t u = Player r t u
+
+insertPlayerstoMap :: [Player] -> Map UserID Player
+insertPlayerstoMap ps = foldr fn Map.empty ps
+  where fn p m = Map.insert (_userID $ _user p) p m
 
 makeNewRoom :: User -> T.Text -> Maybe Password -> Room
-makeNewRoom user name pass = Room user [] name pass (pure user) Nothing
+makeNewRoom u n p = Room u [] n p (pure u) Nothing
 
 randomizeList :: Show a => [a] -> IO [a]
-randomizeList !board = swapRandom board 99
+randomizeList !board = swapRandom board (99 :: Int)
   where swapRandom b 0 = return b
         swapRandom b n = do
           x <- randomRIO (0, (lengthWords) - 1)
@@ -167,27 +188,34 @@ assignOwnership n firstTurn = do
 
 startNewGame :: [User] -> IO GameState
 startNewGame p = do
-  players <- randomizeList p
+  ps <- randomizeList p
 
-  let blueGuesser = map (makePlayer Guesser Blue) $ take 1 players
-      redGuesser = map (makePlayer Guesser Red) $ take 1 $ drop 1 players
-      blueSpeaker = map (makePlayer Speaker Blue) $ take 1 $ drop 2 players
-      redSpeaker = map (makePlayer Speaker Red) $ take 1 $ drop 3 players
+  let blueGuesser = map (makePlayer Guesser Blue) $ take 1 ps
+      redGuesser = map (makePlayer Guesser Red) $ take 1 $ drop 1 ps
+      blueSpeaker = map (makePlayer Speaker Blue) $ take 1 $ drop 2 ps
+      redSpeaker = map (makePlayer Speaker Red) $ take 1 $ drop 3 ps
       blueListeners = map (makePlayer Listener Blue)
-        $ take (listenersPerTeam) $ drop 4 players
+        $ take (listenersPerTeam) $ drop 4 ps
       redListeners = map (makePlayer Listener Red)
-        $ takeWhile (const True) $ drop listenersPerTeam $ drop 4 players
+        $ takeWhile (const True) $ drop listenersPerTeam $ drop 4 ps
 
       allPlayers = blueGuesser ++ redGuesser
         ++ blueSpeaker ++ redSpeaker
         ++ blueListeners ++ redListeners
 
   firstTurn <- randomIO
-  gameBoard <- assignOwnership testWords firstTurn
+  gb <- assignOwnership testWords firstTurn
 
   players' <- randomizeList allPlayers
-  return (GameState firstTurn gameBoard players' False)
+  let playersMap = insertPlayerstoMap players'
+  return (GameState firstTurn gb playersMap False)
   where listenersPerTeam = (div (length p) 2) - 2
 
-revealWords :: GameState -> [T.Text] -> GameState
-revealWords gameState guessWords = undefined
+revealCodeword :: Codeword -> GameState
+  -> GameState
+revealCodeword c@Codeword{..} gs@GameState{..} =
+  gs {_gameBoard = reveal (_gameBoard)}
+  where reveal (gb:gbs)
+          | gb == c = c {_revealed = True}  : reveal gbs
+          | otherwise = gb : reveal gbs
+        reveal [] = []

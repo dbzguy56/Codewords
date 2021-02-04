@@ -19,18 +19,26 @@ import Safe
 
 import Data.Aeson
 import Data.IntMap as M
-import Data.List.NonEmpty as NE ((<|), filter, fromList, length, nonEmpty, toList)
+import Data.List as L (filter)
+import qualified Data.List.NonEmpty as NE ((<|), filter, length, nonEmpty, toList)
 import qualified Data.Text as T
-import qualified Data.Text.Encoding as T
 
 import Network.WebSockets
 import Network.WebSockets.Snap
 
+data UConnection
+  = UConn { uID :: UserID
+          , connection :: Connection
+          }
+
+instance Eq UConnection where
+  (==) (UConn a _) (UConn b _) = a == b
 
 data ServerState
   = State { userIDCounter :: TVar Int
           , rooms :: TVar (IntMap Room)
           , broadcast :: TChan ServerMsg
+          , usersConnected :: TVar [UConnection]
           }
 {-
   TVar a
@@ -40,16 +48,20 @@ data ServerState
     TChan is an abstract type representing an unbounded FIFO channel.
 -}
 
-
-systemUser = User ("SYSTEM" :: T.Text) (-1)
+systemUser :: User
+systemUser = User ("SYSTEM" :: T.Text) (UserID (-1))
 
 handleNewConnection :: Maybe User -> ServerState -> Connection -> IO ()
+{-
+  receiveData :: WebSocketsData a => Connection -> IO a
+    Receive a message, converting it to whatever format is needed.
+-}
 handleNewConnection mUser state connection = do
-  let send = sendTextData connection.encode
+  let s = sendTextData connection.encode
   a <- receiveData connection
   case decode a of
     Just decodedMsg -> do
-      newMUser <- handleClientMsg state mUser decodedMsg send
+      newMUser <- handleClientMsg state mUser decodedMsg s connection
       handleNewConnection newMUser state connection
 
     _  ->
@@ -94,23 +106,21 @@ handleWebsocket s p = do
 
 
       readTVar :: TVar a -> STM a
-      Return the current value stored in a TVar.
+        Return the current value stored in a TVar.
     -}
   fullConnection <- acceptRequest p
-  let send = sendTextData fullConnection.encode
+  let sendFn = sendTextData fullConnection.encode
   bc <- atomically $ dupTChan (broadcast s)
   forkIO $ handleTChanComms fullConnection bc
   roomIntMap <- atomically $ readTVar (rooms s)
-  send (RoomList roomIntMap)
+  sendFn (RoomList roomIntMap)
   handleNewConnection Nothing s fullConnection
-  --sendTextData fullConnection ("Oof" :: T.Text)
-  --sendClose fullConnection ("You are already dead" :: T.Text)
   return ()
 
 
 handleClientMsg :: ServerState -> Maybe User -> ClientMsg
-  -> (ServerMsg -> IO ()) -> IO (Maybe User)
-handleClientMsg state mUser cMsg send = do
+  -> (ServerMsg -> IO ()) -> Connection -> IO (Maybe User)
+handleClientMsg state mUser cMsg sendFn connection = do
   {-
   writeTVar :: TVar a -> a -> STM ()
     Write the supplied value into a TVar.
@@ -118,19 +128,21 @@ handleClientMsg state mUser cMsg send = do
   let updateFn = tryUpdateRoom (rooms state) (broadcast state)
 
   case cMsg of
-    CreateName name -> do
+    CreateName n -> do
       newID <- nextUserID (userIDCounter state)
-      let newUser = User name newID
-      send (NameCreated newUser)
+      let newUser = User n (UserID newID)
+      atomically $ modifyTVar' (usersConnected state) $ \list ->
+        (UConn (UserID newID) connection) : list
+      sendFn (NameCreated newUser)
       return $ Just newUser
 
-    CreateRoom name pass -> do
+    CreateRoom n pass -> do
       case mUser of
         Just u -> do
-          let newRoom = makeNewRoom u name pass
+          let newRoom = makeNewRoom u n pass
           roomID <- atomically $ stateTVar (rooms state) (addRoom newRoom)
           atomically $ writeTChan (broadcast state) (RoomChanged roomID newRoom)
-          send (RoomCreated roomID newRoom)
+          sendFn (RoomCreated roomID newRoom)
         Nothing ->
           return ()
       return mUser
@@ -142,11 +154,11 @@ handleClientMsg state mUser cMsg send = do
           mRoom <- updateFn roomID $ appendUserToRoom u
 
           case mRoom of
-            Just r -> do
+            Just _ -> do
               updateFn roomID $ appendRoomChatMsg $ RoomChatMessage systemUser (
                   (_name u) <> " has joined the room."
                 )
-              send (RoomJoined roomID)
+              sendFn (RoomJoined roomID)
             Nothing ->
               return ()
         Nothing ->
@@ -162,16 +174,14 @@ handleClientMsg state mUser cMsg send = do
             removeUserFromRoom u
 
           case mRoom of
-            Just r -> do
+            Just _ -> do
               updateFn roomID $ appendRoomChatMsg $ RoomChatMessage systemUser (
                   (_name u) <> " has left the room."
                 )
               return ()
-              -- TODO: Delete Room after no users
-
             Nothing ->
-              atomically $ writeTChan (broadcast state) (RoomDeleted roomID)
-          send (LeftRoom u)
+              return ()
+          sendFn (LeftRoom u)
         Nothing ->
           return ()
 
@@ -184,32 +194,82 @@ handleClientMsg state mUser cMsg send = do
     StartGame roomID -> do
       case mUser of
         Just u -> do
+          {-
           let gs = GameState Blue [] [] False
           mRoom <- updateFn roomID $ tryStartGame u gs
 
           case mRoom of
+            Just r -> do -}
+          mRoom <- updateFn roomID $ appendRoomChatMsg $
+            RoomChatMessage systemUser $
+              (_name u) <> " has started the game."
+
+          case mRoom of
             Just r -> do
-              updateFn roomID $ appendRoomChatMsg $
-                RoomChatMessage systemUser $
-                  (_name u) <> " has started the game."
+              let rPlayers = NE.toList $ _roomPlayers r
 
-              newGameState <- startNewGame $ NE.toList $ _roomPlayers r
-
+              newGameState <- startNewGame rPlayers
               mNewRoom <- updateFn roomID $ updateRoomGameState newGameState
+
               case mNewRoom of
-                Just newR -> do
-                  atomically $ writeTChan (broadcast state) (GameStarted roomID)
-                  atomically $ writeTChan (broadcast state) (RoomChanged roomID newR)
+                Just _ -> do
+                  usConnected <- readTVarIO (usersConnected state)
+                  sendUsersServerMsg rPlayers (GameStarted roomID)
+                    usConnected
 
                 Nothing ->
                   return ()
+
             --TODO: clean these up using monad?
             Nothing ->
               return ()
+
         Nothing ->
           return ()
 
       return mUser
+
+    ChangeGameState roomID codeword -> do
+      mRoom <- roomExist (rooms state) roomID
+      case mRoom of
+        Just r ->
+          case (_roomGameState r) of
+            Just gs -> do
+              let newGameState = revealCodeword codeword gs
+              mNewRoom <- updateFn roomID $ updateRoomGameState newGameState
+
+              case mNewRoom of
+                Just _ -> do
+                  atomically $ writeTChan (broadcast state) (GameStateChanged roomID)
+
+                Nothing ->
+                  return ()
+
+            Nothing ->
+              return ()
+
+        Nothing ->
+          return ()
+
+      return mUser
+
+
+sendUsersServerMsg :: [User] -> ServerMsg
+  -> [UConnection] -> IO ()
+sendUsersServerMsg roomUsers sMsg userCs = do
+  let uCs = L.filter (roomContainsUC roomUsers) userCs
+  sendMsgs uCs
+  where roomContainsUC :: [User] -> UConnection
+          -> Bool
+        roomContainsUC [] _ = False
+        roomContainsUC (u:us) uC
+          | (_userID u) == (uID uC) = True
+          | otherwise = roomContainsUC us uC
+        sendMsgs [] = return ()
+        sendMsgs (x:xs) = do
+          let s = sendTextData (connection x).encode
+          s sMsg
+          sendMsgs xs
 
 
 tryUpdateRoom :: TVar (IntMap Room) -> TChan ServerMsg
@@ -235,37 +295,40 @@ tryUpdateRoom :: TVar (IntMap Room) -> TChan ServerMsg
     set :: ASetter s t a b -> b -> s -> t
 
     lookup :: Key -> IntMap a -> Maybe a
-  -}
-tryUpdateRoom rTVar broadcastChan rID fn  = do
-  rIntMap <- readTVarIO rTVar
-  roomExist $ M.lookup rID rIntMap
-  where roomExist Nothing = return Nothing
-        roomExist (Just _) = do
-          mRoom <- atomically $ stateTVar rTVar $ \rMap ->
-            let r' = adjust fn rID rMap in
-            (M.lookup rID r', r')
 
-          case mRoom of
-            Just r ->
-              atomically $ writeTChan broadcastChan (RoomChanged rID r)
-            Nothing -> return ()
-          return mRoom
-{-
-  atomically $ stateTVar rTVar $ \rMap ->
-  let
-    mRoom = M.lookup rID rMap
-    r' =
+    writeTChan :: TChan a -> a -> STM ()
+      Write a value to a TChan.
+  -}
+tryUpdateRoom rTVar broadcastChan rID fn = do
+  r <- roomExist rTVar rID
+  case r of
+    Just _ -> do
+      mRoom <- atomically $ stateTVar rTVar $ \rMap ->
+        let r' = adjust fn rID rMap in
+        (M.lookup rID r', r')
+
       case mRoom of
-        Just r -> fn r
-        Nothing -> rMap
-  in
-  (M.lookup rID r', r')
--}
+        Just room ->
+          atomically $ writeTChan broadcastChan (RoomChanged rID room)
+        Nothing -> do
+          putStrLn "Could not apply fn to update room."
+          return ()
+      return mRoom
+
+    Nothing -> do
+      putStrLn "Room does not exist, could not update room."
+      return Nothing
+
+roomExist :: TVar (IntMap Room) -> Int
+  -> IO (Maybe Room)
+roomExist rTVar rID = do
+  rIntMap <- readTVarIO rTVar
+  return $ M.lookup rID rIntMap
 
 deleteRoom :: TVar (IntMap Room) -> Int
   -> IO (Maybe Room)
 deleteRoom rTVar rID = atomically $ stateTVar rTVar $ \r ->
-  let r' = delete rID r in
+  let r' = M.delete rID r in
   (M.lookup rID r', r')
 
 removeUserOrRoom :: TVar (IntMap Room) -> TChan ServerMsg
@@ -278,10 +341,14 @@ removeUserOrRoom rTVar broadcastChan rID fn = do
       f (NE.length $ _roomPlayers r)
     Nothing ->
       return Nothing
-  where f 1 = deleteRoom rTVar rID
+  where f 1 = do
+          deleteRoom rTVar rID
+          atomically $ writeTChan broadcastChan (RoomDeleted rID)
+          return Nothing
         f _ = tryUpdateRoom rTVar broadcastChan rID fn
 
-handleTChanComms :: Connection -> TChan ServerMsg -> IO ()
+handleTChanComms :: Connection -> TChan ServerMsg
+  -> IO ()
 handleTChanComms c t = forever $ do
   {-
   class Functor f => Applicative f where
@@ -292,10 +359,14 @@ handleTChanComms c t = forever $ do
 
   forever :: Applicative f => f a -> f b
     Repeat an action indefinitely.
+
+  readTChan :: TChan a -> STM a
+    Read the next value from the TChan.
   -}
-  let send = sendTextData c.encode
+  let sendFn = sendTextData c.encode
   s <- atomically $ readTChan t
-  send s
+  sendFn s
+
 
 appendUserToRoom :: User -> Room
   -> Room
@@ -309,7 +380,7 @@ appendUserToRoom :: User -> Room
 
   -}
 appendUserToRoom u r = addUser r
-  where addUser = over roomPlayers (u <|)
+  where addUser = over roomPlayers (u NE.<|)
 
 removeUserFromRoom :: User -> Room
   -> Room
@@ -342,7 +413,6 @@ updateRoomGameState :: GameState -> Room
 updateRoomGameState gs r@Room{..} = r {_roomGameState = Just gs}
 
 
-
 appendRoomChatMsg :: RoomChatMessage -> Room -> Room
 appendRoomChatMsg rChatMsg r = addMsg r
   where addMsg = over roomChat (rChatMsg :)  -- room {_roomChat = rChatMsg : _roomChat room}
@@ -352,7 +422,7 @@ nextUserID :: TVar Int -> IO Int
 nextUserID a = atomically $ stateTVar a $ \c -> (c, c + 1)
 
 addRoom :: Room -> IntMap Room -> (Int, IntMap Room)
-addRoom r m = (newIndex, insert newIndex r m)
+addRoom r m = (newIndex, M.insert newIndex r m)
   {-
   maybe :: b -> (a -> b) -> Maybe a -> b
     The maybe function takes a default value, a function, and a
@@ -414,8 +484,9 @@ initServer = do
   -}
   c <- newTVarIO (0 :: Int)
   rooms <- newTVarIO mempty
+  uConnections <- newTVarIO mempty
   broadcast <- newBroadcastTChanIO
-  return $ State c rooms broadcast
+  return $ State c rooms broadcast uConnections
 
 backend :: Backend BackendRoute FrontendRoute
 backend = Backend

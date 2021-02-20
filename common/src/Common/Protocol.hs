@@ -17,6 +17,7 @@ data ClientMsg
   | LeaveRoom Int
   | StartGame Int
   | ChangeGameState Int Codeword
+  | SendClue Int Clue
 
 data ServerMsg
   = GameStarted Int

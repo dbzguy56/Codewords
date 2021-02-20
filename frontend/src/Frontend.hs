@@ -13,26 +13,25 @@ module Frontend where
 
 import Common.Codewords
 import Common.Protocol
+import Common.Route
 import Control.Lens
 import Control.Monad
 import Control.Monad.Fix
 import Control.Monad.IO.Class
-import Data.IntMap (IntMap, insert, delete)
 
+import Data.IntMap (IntMap, insert, delete)
+import Data.Char (isAlpha)
 import Data.List.NonEmpty (NonEmpty)
-import qualified Data.Map as Map (lookup)
 import qualified Data.IntMap as M
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text as T
-import Language.Javascript.JSaddle
 
 import Obelisk.Frontend
 import Obelisk.Route
 import Obelisk.Generated.Static
+import Language.Javascript.JSaddle
 
 import Reflex.Dom.Core
-
-import Common.Route
 
 type CodewordsM t m = ( DomBuilder t m , PostBuild t m , TriggerEvent t m
                       , HasJSContext (Performable m)
@@ -57,6 +56,12 @@ data RoomStateView
   = LobbyView
   | GameView
   deriving Eq
+
+data InvalidHintInput
+  = FieldEmpty
+  | MultipleWords
+  | InvalidChars
+  | ContainsCodeword
 
 codeWordsSocket :: CodewordsM t m
   => Event t ClientMsg -> m (Event t ServerMsg)
@@ -89,9 +94,9 @@ showMsgs msg = do
   simpleList msgs $ el "div" . dynText
   return ()
 
-roomChatWidget :: CodewordsM t m => Dynamic t Room -> User
+roomChatWidget :: CodewordsM t m => User -> Dynamic t Room
   -> m (Event t RoomChatMessage)
-roomChatWidget r u = do
+roomChatWidget u r = do
   {-
   data Dynamic t :: * -> *
     A container for a value that can change over time and
@@ -131,24 +136,40 @@ roomChatWidget r u = do
           dynText ": "
           dynText $ fmap chatMessage rChat
         )
-  elClass "div" "flex flex-row" $ do
-    eventText <- inputTextBoxBtnWidget "Send" "width:85%"
-    return $ fmap (RoomChatMessage u) eventText
+
+  e <- dyn $ ffor (_roomGameState <$> r) $ \case
+    Just gs -> do
+      let currentP = getPlayer u gs
+      case currentP of
+        Just p -> ifSpeaker $ _role p
+        Nothing -> showInput
+    Nothing -> showInput
+  switchHold never e
+
+  where showInput = elClass "div" "flex flex-row" $ do
+          eventText <- inputTextBoxBtnWidget
+            "Send" "width:85%"
+          return $ fmap (RoomChatMessage u) eventText
+
+        ifSpeaker Speaker = elClass "div" "flex flex-row" $
+            text "Speakers can't talk" >> return never
+        ifSpeaker _ = showInput
+
 
 styleCard :: PlayerRole -> Codeword -> T.Text
 styleCard pr (Codeword _ o r)
-    | r == True = T.pack $ (++) (color o) "600"
-    | pr == Speaker = T.pack $ (++) (color o) "200"
-    | otherwise = T.pack $ "bg-gray-600"
-    where color Bystander = "bg-indigo-"
+    | r == True = T.pack $ (++) (color o) "700"
+    | pr == Speaker = T.pack $ (++) (color o) "300"
+    | otherwise = T.pack $ "bg-gray-400"
+    where color Bystander = "bg-green-"
           color Killer = "bg-gray-"
           color (TeamOwned Red) = "bg-red-"
           color (TeamOwned Blue) = "bg-blue-"
 
 
-displayTopBar :: CodewordsM t m => User
+displayRoleBar :: CodewordsM t m => User
   -> Dynamic t (Maybe GameState) -> m ()
-displayTopBar u mGS = do
+displayRoleBar u mGS = do
   elClass "div" "flex justify-between" $ do
     dyn_ $ ffor mGS $ \case
       Just gs -> do
@@ -175,48 +196,37 @@ displayTopBar u mGS = do
         el "span" $ text "Gamestate does not exist:("
         return ()
 
-  where teamColor Red = "text-red-400"
-        teamColor Blue = "text-blue-400"
-
-getPlayer :: User -> GameState
-  -> Maybe Player
-  {-
-  (^?) :: s -> Getting (First a) s a -> Maybe a
-    Perform a safe head of a Fold or Traversal or
-    retrieve Just the result from a Getter or Lens.
-    When using a Traversal as a partial Lens, or
-    a Fold as a partial Getter this can be a
-    convenient way to extract the optional value.
-  -}
-getPlayer (User _ k) gs = Map.lookup k (_players gs)
-
-gameBoardUI :: CodewordsM t m => Player
+gameBoardUI :: CodewordsM t m => Player -> Dynamic t TurnPhase
   -> Dynamic t Board -> Dynamic t Team -> m (Event t Codeword)
-gameBoardUI p gb t = elClass "div" "grid grid-cols-5 gap-4 p-4 h-full" $ do
-  eList <- simpleList gb (codewordUI t)
+gameBoardUI p tP gb t = elClass "div" "grid grid-cols-5 gap-4 p-4 h-full" $ do
+  eList <- simpleList gb (codewordUI p t tP)
   return $ switchDyn $ leftmost <$> eList
-  where mkStyle c = "p-4 flex justify-center rounded-lg items-center "
-          <> styleCard (_role p) c
 
-        codewordUI :: CodewordsM t m => Dynamic t Team
-          -> Dynamic t Codeword -> m (Event t Codeword)
-        codewordUI t' c = do
-          (e, _) <- elDynClass' "div" (mkStyle <$> c) $ dynText
-            $ _word <$> c
-          clickE <- dyn $ (isGuesser p c e) <$> t'
-          switchHold never clickE
+codewordUI :: CodewordsM t m => Player -> Dynamic t Team
+  -> Dynamic t TurnPhase -> Dynamic t Codeword -> m (Event t Codeword)
+codewordUI p t' tP c = do
+  (e, _) <- elDynClass' "div" (mkStyle <$> c) $ dynText
+    $ _word <$> c
 
-        isGuesser (Player Guesser pT _) c' e' tTurn = doIfTrue c' e' $ tTurn == pT
-        isGuesser _ _ _ _ = return never
+  clickE <- dyn $ (isGuesser p c e) <$> tP <*> t'
+  switchHold never clickE
+
+  where isGuesser (Player Guesser pT _) c' e' (Guessing _) tTurn =
+          doIfTrue c' e' $ tTurn == pT
+        isGuesser _ _ _ _ _ = return never
+
         doIfTrue c2 e2 True = return $ tag (current c2) $ domEvent Click e2
         doIfTrue _ _ False = return never
+
+        mkStyle c' = "p-4 flex justify-center rounded-lg items-center "
+                <> styleCard (_role p) c'
 
 displayCodewords :: CodewordsM t m => User
  -> Dynamic t GameState -> m (Event t Codeword)
 displayCodewords u gs = do
   let mP = getPlayer u <$> gs
   clientMsg <- dyn $ ffor mP $ \case
-    Just p -> gameBoardUI p (_gameBoard <$> gs) (_currentTurn <$> gs)
+    Just p -> gameBoardUI p (_turnPhase <$> gs) (_gameBoard <$> gs) (_currentTurn <$> gs)
     Nothing -> el "div" $ text "err at displayCodewords" >> return never
   switchHold never clientMsg
 
@@ -260,6 +270,37 @@ displayGameBoard u mGS = do
         return never
   switchHold never codewordE
 
+displayBottomBar :: CodewordsM t m => User -> Int
+  -> Dynamic t (Maybe GameState) -> m (Event t ClientMsg)
+displayBottomBar _ n mGS = do
+  elClass "div" "flex" $ do
+    backBtn <- elClass "span" "" $
+      btnWidget "bg-gray-600" "Leave"
+
+    dyn_ $ ffor mGS $ \case
+      Just gs -> do
+        elClass "span" "flex flex-col text-base" $ do
+          elClass "span" "text-center" $ text "CARDS LEFT"
+          elClass "span" "" $ do
+            elClass "span" "text-blue-600" $ text "BLUE: "
+            elClass "span" "" $ text $ tShow $ _blueCards $ _cardsLeft gs
+
+            elClass "span" "text-red-600" $ text "RED: "
+            elClass "span" "" $ text $ tShow $ _redCards $ _cardsLeft gs
+
+        ifGuessing $ _turnPhase gs
+
+      Nothing -> return never
+
+    return $ leftmost [LeaveRoom n <$ backBtn]
+
+ifGuessing :: CodewordsM t m => TurnPhase -> m (Event t ())
+ifGuessing (Guessing (Clue _ _ g)) = do
+        elClass "span" "" $ text $ "GUESSES LEFT: " <> (tShow g)
+        elClass "span" "" $ btnWidget "bg-gray-600" "END TURN"
+        return never
+ifGuessing _ = return never
+
 gameBoardWidget :: CodewordsM t m => Int -> Dynamic t Room
   -> User -> m (Event t ClientMsg)
 gameBoardWidget n r u = do
@@ -282,12 +323,11 @@ gameBoardWidget n r u = do
   (<$>) :: Functor f => (a -> b) -> f a -> f b
       An infix synonym for fmap.
   -}
-  displayTopBar u (_roomGameState <$> r)
+  displayRoleBar u (_roomGameState <$> r)
   codeword <- displayGameBoard u (_roomGameState <$> r)
-  backBtn <- elClass "div" "flex" $ do
-    btnWidget "bg-blue-600" "Leave"
+  bottomE <- displayBottomBar u n (_roomGameState <$> r)
   return $ leftmost [ChangeGameState n <$> codeword,
-    LeaveRoom n <$ backBtn]
+    bottomE]
 
 
 btnWidget :: CodewordsM t m => T.Text -> T.Text -> m (Event t ())
@@ -295,25 +335,184 @@ btnWidget style t = do
   (e, _)  <- elClass' "button" style $ text t
   return $ domEvent Click e
 
+displaySideBar :: CodewordsM t m => Int -> User
+  -> Dynamic t Room -> m (Event t ClientMsg)
+displaySideBar n u r = do
+  e <- dyn $ ffor (_roomGameState <$> r) $ \case
+    Just gs -> do
+      let currentP = getPlayer u gs
+          currentTeam = _currentTurn gs
+          tPhase = _turnPhase gs
+      case currentP of
+        Just p -> do
+          let pr = _role p
+              pt = _team p
+          ifSpeakerClue pr tPhase (currentTeam == pt) gs
+        Nothing -> displayRoomChat n u r
+
+    Nothing -> displayRoomChat n u r
+  switchHold never e
+
+  where ifSpeakerClue Speaker CluePicking True gs' = displaySpeakerView n (_gameBoard gs')
+        ifSpeakerClue _ _ _ _ = displayRoomChat n u r
+
+parseHintInput :: Board -> T.Text -> Int
+  -> Either InvalidHintInput Clue
+parseHintInput b t g
+  | (T.strip t) == "" = Left FieldEmpty
+  | (length $ T.words t) > 1 = Left MultipleWords
+  | checkNonLetters (T.toLower $ T.strip t) = Left InvalidChars
+  | checkCodewords (T.toLower $ T.strip t) b = Left ContainsCodeword
+  | otherwise = Right (Clue (T.strip t) g (g + 1))
+
+  where checkNonLetters w = not $ T.null
+          $ T.dropWhile isAlpha w
+
+        checkCodewords _ [] = False
+        checkCodewords w (c:[]) = w == (T.toLower $ _word c)
+        checkCodewords w (c:cs)
+          | w == (T.toLower $ _word c) = True
+          | otherwise = checkCodewords w cs
+
+
+hintErrMsg :: InvalidHintInput -> T.Text
+hintErrMsg FieldEmpty = "Hint cannot be empty!"
+hintErrMsg MultipleWords = "Hint can only be one word!"
+hintErrMsg InvalidChars = "Hint cannot contain invalid characters!"
+hintErrMsg ContainsCodeword = "Hint cannot contain a codeword!"
+
+
+displaySpeakerView :: CodewordsM t m => Int
+  -> Board -> m (Event t ClientMsg)
+displaySpeakerView n gb = mdo
+  elClass "div" "flex flex-col justify-between bg-gray-600 \
+    \ h-full text-center" $ mdo
+
+    elClass "div" "" $ text "Give your team a one word hint!"
+
+    cMsg <- elClass "div" "" $ do
+      elClass "div" "" $ text "HINT"
+      h <- inputElement $ def
+
+      let elVal = _inputElement_value h
+          eitherClue = (parseHintInput gb) <$> elVal <*> guesses
+      dyn $ ffor eitherClue $ \case
+        Left a -> do
+          elClass "div" "bg-red-300" $ text $ hintErrMsg a
+          return never
+
+        Right c ->
+          return $ (SendClue n c) <$ (domEvent Click submitE)
+
+    guesses <- elClass "div" "" $ do
+      elClass "div" "" $ text "RELATED WORDS TO HINT"
+      g <- elClass "div" "flex" $ mdo
+        dInt' <- elClass "div" "bg-gray-50 rounded-md" $ do
+          dInt <- foldDyn ($) (1 :: Int) bClicked
+          display dInt
+          return dInt
+
+        bClicked <- elClass "div" "" $ do
+          increment <- btn "▲" incFn
+          decrement <- btn "▼" decFn
+
+          return $ leftmost [increment, decrement]
+
+        return dInt'
+      return g
+
+
+    let btnColor = "bg-gray-400"
+    (submitE, _) <- elClass' "button" btnColor $
+      text "SUBMIT HINT"
+
+    switchHold never cMsg
+
+    where btn label fn = mdo
+            (e, _) <- el' "button" $ text label
+            return $ fn <$ domEvent Click e
+
+          incFn 9 = 9
+          incFn x = x + 1
+          decFn 0 = 0
+          decFn x = subtract 1 x
+
+
+displayRoomChat :: CodewordsM t m => Int -> User
+  -> Dynamic t Room -> m (Event t ClientMsg)
+displayRoomChat n u r = do
+  msgStream <- roomChatWidget u r
+  return $ fmap (SendRoomChatMsg n) msgStream
+
+displayTopMessageBar :: CodewordsM t m => Dynamic t Room
+  -> m ()
+displayTopMessageBar r = do
+  elDynClass "div" "flex whitespace-pre-wrap \
+    \ justify-center bg-gray-600 h-auto lg:text-3xl" $ do
+    dyn_ $ ffor (_roomGameState <$> r) $ \case
+      Just gs -> do
+        case (_winner gs) of
+          True -> do
+            elClass "span" (teamColor $ _currentTurn gs) $
+              text $ T.pack $ show $ _currentTurn gs
+            text " team wins!"
+          False ->
+            turnPhaseMsg gs $ _turnPhase gs
+
+      Nothing -> do
+        -- TODO: How to do this differently?
+        text "Waiting on "
+        elDynClass "span" "text-yellow-300" $ dynText $
+          _name._roomAdmin <$> r
+        text " to start the game"
+
+    return ()
+  return ()
+
+turnPhaseMsg :: CodewordsM t m => GameState -> TurnPhase -> m ()
+turnPhaseMsg gs CluePicking = do
+  case (getCurrentRole Speaker gs) of
+    Just p -> do
+      elClass "span" (teamColor $ _team p)
+        $ text $ _name $ _user p
+      text  " is thinking of a hint."
+      return ()
+    Nothing ->
+      text "Cannot find Speaker"
+turnPhaseMsg gs (Guessing (Clue h r _)) = do
+  elClass "span" "flex justify-between w-full px-2" $ do
+    el "div" $ do
+      elClass "span" "color-red-600" $ text $ "HINT: " <> h
+
+    el "div" $ do
+      text "Guesser: "
+      case (getCurrentRole Guesser gs) of
+        Just p ->
+          elClass "span" (teamColor $ _team p) $ text
+            $ _name $ _user p
+        Nothing ->
+          text "Cannot find Guesser"
+
+    el "div" $ text $ "RELATED WORDS: " <> tShow r
+
+teamColor :: Team -> T.Text
+teamColor Blue = "text-blue-600"
+teamColor Red = "text-red-600"
+
 displayRoom :: CodewordsM t m => Int -> Dynamic t Room -> User
   -> RoomStateView -> m (Event t ClientMsg)
 displayRoom n r u v = do
   {-
   dynText :: hoogle => Dynamic t Text -> m ()
   -}
-  elClass "div" "flex flex-col h-screen" $ do
+  elClass "div" "flex flex-col h-screen select-none" $ do
     let rAdmin = fmap _roomAdmin r
     let adminStatus = isUserAdmin rAdmin (return u)
     elClass "div" "flex justify-center bg-gray-700 xl:h-16 \
       \ 2xl:h-8 rounded lg:text-5xl" $
       text "GET UR BEEG YOSHI HERE"
-    elDynClass "div" "flex whitespace-pre-wrap \
-      \ justify-center bg-gray-600 h-auto lg:text-3xl" $ do
-      -- How would Sky do this
-      let adminName = fmap _name rAdmin
-      text "Waiting on "
-      elDynClass "span" "text-yellow-300" $ dynText adminName
-      text " to start the game"
+
+    displayTopMessageBar r
 
     elClass "div" "flex flex-col text-5xl md:flex-row h-full overflow-hidden lg:text-3xl" $ do
       btn <- elClass "div" "flex flex-col flex-grow bg-gray-500 rounded h-full" $ do
@@ -342,10 +541,10 @@ displayRoom n r u v = do
             clientMsg <- gameBoardWidget n r u
             return clientMsg
 
-      elClass "div" "flex flex-col h-full lg:w-1/4" $ do
-        --TODO: Chat doesnt start at top
-        msgStream <- roomChatWidget r u
-        return $ leftmost [fmap (SendRoomChatMsg n) msgStream, btn]
+      cMsg <- elClass "div" "flex flex-col h-full lg:w-1/4" $ do
+        displaySideBar n u r
+
+      return $ leftmost [cMsg, btn]
 
 isUserAdmin :: Reflex t => Dynamic t User
   -> Dynamic t User -> Dynamic t Bool
@@ -410,8 +609,8 @@ displayRoomUsers admin users = elClass "div" "px-4 h-full" $ do
   where makeAdminStyle True  = " text-yellow-300"
         makeAdminStyle False = ""
 
-roomsWidget :: CodewordsM t m => Event t (IntMap Room) -> Event t (Int, Room)
-  -> Event t Int -> m (Dynamic t (IntMap Room))
+roomsWidget :: CodewordsM t m => Event t (IntMap Room)
+  -> Event t (Int, Room) -> Event t Int -> m (Dynamic t (IntMap Room))
   {-
   mempty :: a
     Identity of mappend
@@ -430,7 +629,8 @@ roomsWidget rList e deleteEvent =
   , fmap delete deleteEvent]
 
 
-roomListWidget :: CodewordsM t m => Dynamic t (IntMap Room) -> m (Event t Int)
+roomListWidget :: CodewordsM t m => Dynamic t (IntMap Room)
+  -> m (Event t Int)
   {-
   switchDyn :: forall t a. Reflex t =>
     Dynamic t (Event t a) -> Event t a
@@ -465,15 +665,19 @@ inputTextBoxBtnWidget :: CodewordsM t m
   -}
 inputTextBoxBtnWidget btnText style = mdo
   inputTextBox <- inputElement $ def
-    & inputElementConfig_elementConfig . elementConfig_initialAttributes
+    & inputElementConfig_elementConfig
+    . elementConfig_initialAttributes
     .~ ("autofocus" =: "" <> "style" =: style )
     & inputElementConfig_setValue .~ ("" <$ send)
 
   (e, _) <- elClass' "button" "bg-gray-100" $ text btnText
+
   let clicked = domEvent Click e
-      enter = keypress Enter (_inputElement_element inputTextBox)
+      enter = keypress Enter (_inputElement_element
+        inputTextBox)
       send = leftmost [clicked, enter]
       elVal = _inputElement_value inputTextBox
+
   return $ tag (current elVal) send
 
 signInWidget :: CodewordsM t m => m (Event t ClientMsg)

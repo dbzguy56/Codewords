@@ -20,7 +20,7 @@ import Safe
 import Data.Aeson
 import Data.IntMap as M
 import Data.List as L (filter)
-import qualified Data.List.NonEmpty as NE ((<|), filter, length, nonEmpty, toList)
+import qualified Data.List.NonEmpty as NE ((<|), filter, length, nonEmpty, toList, head)
 import qualified Data.Text as T
 
 import Network.WebSockets
@@ -194,12 +194,6 @@ handleClientMsg state mUser cMsg sendFn connection = do
     StartGame roomID -> do
       case mUser of
         Just u -> do
-          {-
-          let gs = GameState Blue [] [] False
-          mRoom <- updateFn roomID $ tryStartGame u gs
-
-          case mRoom of
-            Just r -> do -}
           mRoom <- updateFn roomID $ appendRoomChatMsg $
             RoomChatMessage systemUser $
               (_name u) <> " has started the game."
@@ -235,24 +229,35 @@ handleClientMsg state mUser cMsg sendFn connection = do
         Just r ->
           case (_roomGameState r) of
             Just gs -> do
-              let newGameState = revealCodeword codeword gs
-              mNewRoom <- updateFn roomID $ updateRoomGameState newGameState
-
-              case mNewRoom of
-                Just _ -> do
-                  atomically $ writeTChan (broadcast state) (GameStateChanged roomID)
-
-                Nothing ->
-                  return ()
-
-            Nothing ->
-              return ()
-
-        Nothing ->
-          return ()
+              revealCIfNotAlr codeword gs roomID state
+            Nothing -> return ()
+        Nothing -> return ()
 
       return mUser
 
+    SendClue roomID clue -> do
+      mRoom <- roomExist (rooms state) roomID
+      case mRoom of
+        Just r ->
+          case (_roomGameState r) of
+            Just gs -> do
+              updateFn roomID $
+                updateRoomGameState (gs {_turnPhase = Guessing clue})
+              return ()
+            Nothing -> return ()
+        Nothing -> return ()
+
+      return mUser
+
+revealCIfNotAlr :: Codeword -> GameState -> Int -> ServerState
+  -> IO ()
+revealCIfNotAlr c@(Codeword _ _ False) gs roomID state = do
+  let updateFn = tryUpdateRoom (rooms state) (broadcast state)
+      newGameState = revealCodeword c gs
+      newGameState' = checkWinner c newGameState
+  updateFn roomID $ updateRoomGameState newGameState'
+  return ()
+revealCIfNotAlr _ _ _ _ = return ()
 
 sendUsersServerMsg :: [User] -> ServerMsg
   -> [UConnection] -> IO ()
@@ -403,8 +408,9 @@ removeUserFromRoom u r = do
   let oldMembers = _roomPlayers r
       newMembers = NE.nonEmpty $ NE.filter (\newU -> _userID u /= _userID newU) oldMembers
   case newMembers of
-    Just p ->
-      r {_roomPlayers = p}
+    Just p -> do
+      let newR = r {_roomPlayers = p}
+      newR {_roomAdmin = NE.head p}
     Nothing ->
       r
 
@@ -415,7 +421,7 @@ updateRoomGameState gs r@Room{..} = r {_roomGameState = Just gs}
 
 appendRoomChatMsg :: RoomChatMessage -> Room -> Room
 appendRoomChatMsg rChatMsg r = addMsg r
-  where addMsg = over roomChat (rChatMsg :)  -- room {_roomChat = rChatMsg : _roomChat room}
+  where addMsg = over roomChat (rChatMsg :)
 
 
 nextUserID :: TVar Int -> IO Int

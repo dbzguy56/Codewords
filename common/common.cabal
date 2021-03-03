@@ -12,4 +12,4 @@ library
   exposed-modules:
     Common.Api
     Common.Route
-  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wpartial-fields -O
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -fno-show-valid-hole-fits -Wincomplete-uni-patterns -Wpartial-fields -O

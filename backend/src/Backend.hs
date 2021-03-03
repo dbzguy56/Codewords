@@ -20,11 +20,14 @@ import Safe
 import Data.Aeson
 import Data.IntMap as M
 import Data.List as L (filter)
-import qualified Data.List.NonEmpty as NE ((<|), filter, length, nonEmpty, toList, head)
+import qualified Data.List.NonEmpty as NE
+  ((<|), filter, length, nonEmpty, toList, last)
 import qualified Data.Text as T
 
 import Network.WebSockets
 import Network.WebSockets.Snap
+
+import System.Random
 
 data UConnection
   = UConn { uID :: UserID
@@ -39,6 +42,7 @@ data ServerState
           , rooms :: TVar (IntMap Room)
           , broadcast :: TChan ServerMsg
           , usersConnected :: TVar [UConnection]
+          , pureGen :: TVar StdGen
           }
 {-
   TVar a
@@ -214,7 +218,6 @@ handleClientMsg state mUser cMsg sendFn connection = do
                 Nothing ->
                   return ()
 
-            --TODO: clean these up using monad?
             Nothing ->
               return ()
 
@@ -224,6 +227,7 @@ handleClientMsg state mUser cMsg sendFn connection = do
       return mUser
 
     ChangeGameState roomID codeword -> do
+
       mRoom <- roomExist (rooms state) roomID
       case mRoom of
         Just r ->
@@ -249,15 +253,19 @@ handleClientMsg state mUser cMsg sendFn connection = do
 
       return mUser
 
+
 revealCIfNotAlr :: Codeword -> GameState -> Int -> ServerState
   -> IO ()
 revealCIfNotAlr c@(Codeword _ _ False) gs roomID state = do
   let updateFn = tryUpdateRoom (rooms state) (broadcast state)
-      newGameState = revealCodeword c gs
-      newGameState' = checkWinner c newGameState
-  updateFn roomID $ updateRoomGameState newGameState'
+
+  newGameState <- atomically $ stateTVar (pureGen state) $ \pGen ->
+    revealCodeword c gs pGen
+
+  updateFn roomID $ updateRoomGameState newGameState
   return ()
 revealCIfNotAlr _ _ _ _ = return ()
+
 
 sendUsersServerMsg :: [User] -> ServerMsg
   -> [UConnection] -> IO ()
@@ -406,11 +414,12 @@ removeUserFromRoom u r = do
     -> f a -> f b
   -}
   let oldMembers = _roomPlayers r
-      newMembers = NE.nonEmpty $ NE.filter (\newU -> _userID u /= _userID newU) oldMembers
+      newMembers = NE.nonEmpty $ NE.filter
+        (\newU -> _userID u /= _userID newU) oldMembers
   case newMembers of
     Just p -> do
       let newR = r {_roomPlayers = p}
-      newR {_roomAdmin = NE.head p}
+      newR {_roomAdminID = _userID $ NE.last p}
     Nothing ->
       r
 
@@ -492,7 +501,8 @@ initServer = do
   rooms <- newTVarIO mempty
   uConnections <- newTVarIO mempty
   broadcast <- newBroadcastTChanIO
-  return $ State c rooms broadcast uConnections
+  pGen <- newTVarIO $ mkStdGen 137
+  return $ State c rooms broadcast uConnections pGen
 
 backend :: Backend BackendRoute FrontendRoute
 backend = Backend

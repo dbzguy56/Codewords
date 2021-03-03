@@ -11,8 +11,8 @@ import Data.Aeson.Types (FromJSONKey, ToJSONKey)
 import qualified Data.Text as T
 import Data.List.Index
 import Data.List.NonEmpty (NonEmpty)
-import Data.Map (Map)
-import qualified Data.Map as Map (empty, insert, lookup, elems)
+import Data.Set (Set)
+import qualified Data.Set as S
 
 import System.Random
 
@@ -23,11 +23,9 @@ testWords = ["Apple", "Blue", "Code", "Dart", "Ear", "Fart", "Green"
             , "Sweater", "Tree", "Uranium", "Vent", "Water"
             , "Yeast", "Zoo"]
 
-data User
-  = User { _name :: T.Text
-         , _userID :: UserID
-         }
-  deriving (Eq, Show)
+newtype UserID = UserID Int
+type Board = [Codeword]
+type Password = T.Text
 
 instance Eq UserID where
   (==) (UserID a) (UserID b) = a == b
@@ -39,7 +37,6 @@ instance Ord UserID where
   (<=) (UserID a) (UserID a') = (<=) a a'
 
 instance FromJSONKey UserID
-
 instance ToJSONKey UserID
 
 data CardsLeft
@@ -52,28 +49,41 @@ data GameState
   = GameState { _cardsLeft :: CardsLeft
               , _currentTurn :: Team
               , _gameBoard :: Board
-              , _players :: Map UserID Player
+              , _guessers :: TeamGuessers
+              , _listeners :: TeamListeners
+              , _speakers :: TeamSpeakers
               , _turnPhase :: TurnPhase
-              , _winner :: Bool
+              , _winner :: Maybe Team
               }
+  deriving (Eq, Show)
+
+data User
+  = User { _name :: T.Text
+         , _userID :: UserID
+         }
+  deriving (Eq, Show)
+
+data TeamListeners
+  = Listeners { _blueListeners :: Set UserID
+              , _redListeners :: Set UserID
+              }
+  deriving (Eq, Show)
+
+data TeamGuessers
+  = Guessers { _blueGuesser :: UserID
+             , _redGuesser :: UserID
+             }
+  deriving (Eq, Show)
+
+data TeamSpeakers
+  = Speakers { _blueSpeaker :: UserID
+             , _redSpeaker :: UserID
+             }
   deriving (Eq, Show)
 
 data TurnPhase
   = CluePicking
   | Guessing Clue
-  deriving (Eq, Show)
-
-data Player
-  = Player { _role :: PlayerRole
-           , _team :: Team
-           , _user :: User
-           }
-  deriving (Eq, Show)
-
-data PlayerRole
-  = Guesser
-  | Listener
-  | Speaker
   deriving (Eq, Show)
 
 data Team
@@ -85,7 +95,6 @@ instance Random Team where
   randomR (minTeam, maxTeam) gen = (toEnum a, b)
     where (a, b) = randomR (fromEnum minTeam, fromEnum maxTeam) gen
   random = randomR (minBound, maxBound)
-
 
 data Ownership
   = TeamOwned Team
@@ -121,7 +130,7 @@ data RoomChatMessage
 
 --TODO: Limit what the front end can see
 data Room
-  = Room { _roomAdmin :: User
+  = Room { _roomAdminID :: UserID
          , _roomChat :: [RoomChatMessage]
          , _roomName :: T.Text
          , _roomPassword :: Maybe T.Text
@@ -130,17 +139,15 @@ data Room
          }
          deriving (Eq, Show)
 
-newtype UserID = UserID Int
-type Board = [Codeword]
-type Password = T.Text
 
 deriveJSON defaultOptions ''User
 deriveJSON defaultOptions ''UserID
 deriveJSON defaultOptions ''Room
 deriveJSON defaultOptions ''RoomChatMessage
-deriveJSON defaultOptions ''Player
-deriveJSON defaultOptions ''PlayerRole
 deriveJSON defaultOptions ''Team
+deriveJSON defaultOptions ''TeamGuessers
+deriveJSON defaultOptions ''TeamListeners
+deriveJSON defaultOptions ''TeamSpeakers
 deriveJSON defaultOptions ''GameState
 deriveJSON defaultOptions ''Codeword
 deriveJSON defaultOptions ''Ownership
@@ -150,59 +157,17 @@ deriveJSON defaultOptions ''CardsLeft
 
 makeLenses ''Codeword
 makeLenses ''GameState
-makeLenses ''Player
-makeLenses ''PlayerRole
 makeLenses ''Room
 makeLenses ''User
-
-findCurrentRole :: Team -> (Team -> Player -> Bool)
-  -> [Player] -> Maybe Player
-findCurrentRole _ _ [] = Nothing
-findCurrentRole currentTeam f (p:[])
-  | f currentTeam p = Just p
-  | otherwise = Nothing
-findCurrentRole currentTeam f (p:ps)
-  | f currentTeam p = Just p
-  | otherwise = findCurrentRole currentTeam f ps
-
-
-getCurrentRole :: PlayerRole -> GameState
-  -> Maybe Player
-getCurrentRole Speaker gs =
-  findCurrentRole (_currentTurn gs) isSpeaker $ Map.elems
-    $ _players gs
-  where isSpeaker c (Player Speaker playerTeam _)
-          | c == playerTeam = True
-          | otherwise = False
-        isSpeaker _ _ = False
-getCurrentRole Guesser gs =
-  findCurrentRole (_currentTurn gs) isGuesser $ Map.elems
-    $ _players gs
-  where isGuesser c (Player Guesser playerTeam _)
-          | c == playerTeam = True
-          | otherwise = False
-        isGuesser _ _ = False
-getCurrentRole _ _ = Nothing
-
-
-getPlayer :: User -> GameState
-  -> Maybe Player
-  {-
-  (^?) :: s -> Getting (First a) s a -> Maybe a
-    Perform a safe head of a Fold or Traversal or
-    retrieve Just the result from a Getter or Lens.
-    When using a Traversal as a partial Lens, or
-    a Fold as a partial Getter this can be a
-    convenient way to extract the optional value.
-  -}
-getPlayer (User _ k) gs = Map.lookup k (_players gs)
-
+makeLenses ''TeamGuessers
+makeLenses ''TeamListeners
+makeLenses ''TeamSpeakers
 
 tryStartGame :: User -> GameState -> Room -> Room
 tryStartGame u gs r@Room{..}
   | isAdmin = r {_roomGameState = Just gs}
   | otherwise = r
-  where isAdmin = _userID u == _userID _roomAdmin
+  where isAdmin = _userID u == _roomAdminID
 
 
 swapAtIndices :: Int -> Int -> [a] -> [a]
@@ -213,15 +178,8 @@ swapAtIndices indexX indexY list = setAt indexY x $ setAt indexX y list
 makeCodeword :: Ownership -> T.Text -> Codeword
 makeCodeword o w = Codeword w o False
 
-makePlayer :: PlayerRole -> Team -> User -> Player
-makePlayer r t u = Player r t u
-
-insertPlayerstoMap :: [Player] -> Map UserID Player
-insertPlayerstoMap ps = foldr fn Map.empty ps
-  where fn p m = Map.insert (_userID $ _user p) p m
-
 makeNewRoom :: User -> T.Text -> Maybe Password -> Room
-makeNewRoom u n p = Room u [] n p (pure u) Nothing
+makeNewRoom u n p = Room (_userID u) [] n p (pure u) Nothing
 
 randomizeList :: Show a => [a] -> IO [a]
 randomizeList !board = swapRandom board (99 :: Int)
@@ -258,36 +216,43 @@ startNewGame :: [User] -> IO GameState
 startNewGame p = do
   ps <- randomizeList p
 
-  let blueGuesser = map (makePlayer Guesser Blue) $ take 1 ps
-      redGuesser = map (makePlayer Guesser Red) $ take 1 $ drop 1 ps
-      blueSpeaker = map (makePlayer Speaker Blue) $ take 1 $ drop 2 ps
-      redSpeaker = map (makePlayer Speaker Red) $ take 1 $ drop 3 ps
-      blueListeners = map (makePlayer Listener Blue)
+  let blueG = head $ map _userID $ take 1 ps
+      redG = head $ map _userID $ take 1 $ drop 1 ps
+      blueS = head $ map _userID $ take 1 $ drop 2 ps
+      redS = head $ map _userID $ take 1 $ drop 3 ps
+      blueLs = map _userID
         $ take (listenersPerTeam) $ drop 4 ps
-      redListeners = map (makePlayer Listener Red)
+      redLs = map _userID
         $ takeWhile (const True) $ drop listenersPerTeam $ drop 4 ps
-
-      allPlayers = blueGuesser ++ redGuesser
-        ++ blueSpeaker ++ redSpeaker
-        ++ blueListeners ++ redListeners
 
   firstTurn <- randomIO
   gb <- assignOwnership testWords firstTurn
 
-  players' <- randomizeList allPlayers
-  let playersMap = insertPlayerstoMap players'
-      (cardsB, cardsR) = firstTurnCards firstTurn
-  return (GameState (CardsLeft cardsB cardsR) firstTurn
-    gb playersMap CluePicking False)
+  let (cardsB, cardsR) = firstTurnCards firstTurn
+
+  return (GameState (CardsLeft cardsB cardsR) firstTurn gb
+    (Guessers blueG redG)
+    (Listeners (S.fromList blueLs) (S.fromList redLs))
+    (Speakers blueS redS)
+    CluePicking Nothing)
+
   where listenersPerTeam = (div (length p) 2) - 2
 
-revealCodeword :: Codeword -> GameState
-  -> GameState
-revealCodeword c@Codeword{..} gs@GameState{..} =
-  gs { _gameBoard = reveal (_gameBoard)
-     , _turnPhase = subtractGs _turnPhase
-     , _cardsLeft = subtractCard _owner _cardsLeft
-     }
+switchTeam :: Team -> Team
+switchTeam Blue = Red
+switchTeam Red = Blue
+
+revealCodeword :: Codeword -> GameState -> StdGen
+  -> (GameState, StdGen)
+revealCodeword c@Codeword{..} gs gen =
+  let gs' = gs & gameBoard .~ (reveal $ _gameBoard gs)
+               & turnPhase .~ (subtractGs $ _turnPhase gs)
+               & cardsLeft .~ (subtractCard (_owner) (_cardsLeft gs))
+      newGS = gs' & winner .~ (checkWinner c gs')
+  in
+  case (_winner newGS) of
+    Just _ -> (newGS, gen)
+    Nothing -> makeNewTurn c newGS (_turnPhase newGS) gen
   where reveal (gb:gbs)
           | gb == c = c {_revealed = True} : reveal gbs
           | otherwise = gb : reveal gbs
@@ -295,7 +260,7 @@ revealCodeword c@Codeword{..} gs@GameState{..} =
 
         subtractGs (Guessing clue@(Clue _ _ guesses)) =
           Guessing (clue {_guessesLeft = guesses - 1})
-        subtractGs tP = tP
+        subtractGs CluePicking = CluePicking
 
         subtractCard (TeamOwned Blue) cL =
           cL {_blueCards = (_blueCards cL) - 1}
@@ -303,27 +268,59 @@ revealCodeword c@Codeword{..} gs@GameState{..} =
           cL {_redCards = (_redCards cL) - 1}
         subtractCard _ cL = cL
 
-newTurn :: GameState -> GameState
-newTurn gs@GameState{..} =
-  gs { _turnPhase = CluePicking
-     , _currentTurn = switchTeam _currentTurn
-     }
 
-   where switchTeam Blue = Red
-         switchTeam Red = Blue
+newTurn :: GameState -> StdGen -> (GameState, StdGen)
+newTurn gs@GameState{..} pGen = do
+  let newTeam = switchTeam _currentTurn
+      (newGS, newGen) = case newTeam of
+        Blue ->
+          let (newG, newLs, nGen) = switchGuesser
+                (_blueGuesser $ _guessers)
+                (_blueListeners $ _listeners) pGen
+          in
+          (gs & guessers.blueGuesser.~ newG
+             & listeners.blueListeners.~ newLs
+           , nGen)
+        Red ->
+          let (newG, newLs, nGen) = switchGuesser
+                (_redGuesser $ _guessers)
+                (_redListeners $ _listeners) pGen
+          in
+          (gs & guessers.redGuesser.~ newG
+             & listeners.redListeners.~ newLs
+           , nGen)
 
-makeNewTurn :: Codeword -> GameState -> TurnPhase
-  -> GameState
-makeNewTurn (Codeword _ (TeamOwned t) _) gs (Guessing (Clue _ _ g))
- | t /= (_currentTurn gs) = newTurn gs
- | g == 1 = newTurn gs
- | otherwise = gs
-makeNewTurn (Codeword _ _ _) gs _ = newTurn gs
+      gs' =
+        newGS { _turnPhase = CluePicking
+              , _currentTurn = newTeam
+              }
+
+  (gs', newGen)
+
+switchGuesser :: UserID -> Set UserID -> StdGen
+  -> (UserID, Set UserID, StdGen)
+switchGuesser oldG ls gen =
+  let (rNum, newGen) = randomR (0, (S.size ls) - 1) gen
+      nextG = ls ^? to S.toList . ix (rNum)
+  in
+  case nextG of
+    Just p -> (p, S.insert oldG $ S.delete p ls, newGen)
+    Nothing -> (oldG, ls, gen)
+
+makeNewTurn :: Codeword -> GameState -> TurnPhase -> StdGen
+  -> (GameState, StdGen)
+makeNewTurn (Codeword _ (TeamOwned t) _) gs (Guessing (Clue _ _ g)) pGen
+ | t /= (_currentTurn gs) = newTurn gs pGen
+ | g == 0 = newTurn gs pGen
+ | otherwise = (gs, pGen)
+makeNewTurn _ gs _ pGen = newTurn gs pGen
 
 checkWinner :: Codeword -> GameState
-  -> GameState
-checkWinner c gs@GameState{..} =
-  checkCards _currentTurn _cardsLeft
-  where checkCards Blue (CardsLeft 0 _) = gs {_winner = True}
-        checkCards Red (CardsLeft _ 0) = gs {_winner = True}
-        checkCards _ _ = makeNewTurn c gs (_turnPhase)
+  -> Maybe Team
+checkWinner (Codeword _ Killer _) gs =
+  Just $ switchTeam $ _currentTurn gs
+checkWinner _ gs =
+  checkCards $ _cardsLeft gs
+  where checkCards (CardsLeft 0 _) = Just Blue
+        checkCards (CardsLeft _ 0) = Just Red
+        checkCards _ = Nothing

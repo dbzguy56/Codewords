@@ -139,9 +139,8 @@ roomChatWidget u r = do
 
   e <- dyn $ ffor (_roomGameState <$> r) $ \case
     Just gs -> do
-      let currentP = getPlayer u gs
-      case currentP of
-        Just p -> ifSpeaker $ _role p
+      case (isSpeaker gs $ _userID u) of
+        Just _ -> speakerChat
         Nothing -> showInput
     Nothing -> showInput
   switchHold never e
@@ -151,21 +150,38 @@ roomChatWidget u r = do
             "Send" "width:85%"
           return $ fmap (RoomChatMessage u) eventText
 
-        ifSpeaker Speaker = elClass "div" "flex flex-row" $
+        speakerChat = elClass "div" "flex flex-row" $
             text "Speakers can't talk" >> return never
-        ifSpeaker _ = showInput
 
 
-styleCard :: PlayerRole -> Codeword -> T.Text
-styleCard pr (Codeword _ o r)
+isSpeaker :: GameState -> UserID -> Maybe Team
+isSpeaker gs uID
+  | uID == (_blueSpeaker $ _speakers gs) = Just Blue
+  | uID == (_redSpeaker $ _speakers gs) = Just Red
+  | otherwise = Nothing
+
+isGuesser :: GameState -> UserID -> Maybe Team
+isGuesser gs uID
+  | uID == (_blueGuesser $ _guessers gs) = Just Blue
+  | uID == (_redGuesser $ _guessers gs) = Just Red
+  | otherwise = Nothing
+
+isListener :: GameState -> UserID -> Maybe Team
+isListener gs uID
+  | elem uID $ _blueListeners $ _listeners gs = Just Blue
+  | elem uID $ _redListeners $ _listeners gs = Just Red
+  | otherwise = Nothing
+
+styleCard :: UserID -> Codeword -> GameState -> T.Text
+styleCard uID (Codeword _ o r) gs
     | r == True = T.pack $ (++) (color o) "700"
-    | pr == Speaker = T.pack $ (++) (color o) "300"
+    | justTrue $ isSpeaker gs uID =
+        T.pack $ (++) (color o) "300"
     | otherwise = T.pack $ "bg-gray-400"
     where color Bystander = "bg-green-"
           color Killer = "bg-gray-"
           color (TeamOwned Red) = "bg-red-"
           color (TeamOwned Blue) = "bg-blue-"
-
 
 displayRoleBar :: CodewordsM t m => User
   -> Dynamic t (Maybe GameState) -> m ()
@@ -178,15 +194,15 @@ displayRoleBar u mGS = do
           elClass "span" (teamColor $ _currentTurn gs) $
             text $ tShow $ _currentTurn gs
 
-        let currentPlayer = getPlayer u gs
+        let mURoleTeam = getUserRoleTeam (_userID u) gs
 
-        case currentPlayer of
-          Just p -> do
+        case mURoleTeam of
+          Just (role, t) -> do
             elClass "div" "" $ do
               text "Your Role: "
-              elClass "span" (teamColor $ _team p) $
-                text $ tShow $ _team p
-              el "span" $ text $ T.pack $ "'s " ++ (show $ _role p)
+              elClass "span" (teamColor $ t) $
+                text $ tShow t
+              el "span" $ text $ T.append (T.pack "'s ") role
 
           Nothing -> do
             el "span" $ text "Couldnt find player"
@@ -196,39 +212,78 @@ displayRoleBar u mGS = do
         el "span" $ text "Gamestate does not exist:("
         return ()
 
-gameBoardUI :: CodewordsM t m => Player -> Dynamic t TurnPhase
-  -> Dynamic t Board -> Dynamic t Team -> m (Event t Codeword)
-gameBoardUI p tP gb t = elClass "div" "grid grid-cols-5 gap-4 p-4 h-full" $ do
-  eList <- simpleList gb (codewordUI p t tP)
+getCurrentGuesserName :: GameState -> NonEmpty User -> Maybe T.Text
+getCurrentGuesserName gs us = getName (NE.toList us) $ getUID (_currentTurn gs)
+  where getUID Blue = _blueGuesser $ _guessers gs
+        getUID Red = _redGuesser $ _guessers gs
+
+getCurrentSpeakerName :: GameState -> NonEmpty User -> Maybe T.Text
+getCurrentSpeakerName gs us = getName (NE.toList us) $ getUID (_currentTurn gs)
+  where getUID Blue = _blueSpeaker $ _speakers gs
+        getUID Red = _redSpeaker $ _speakers gs
+
+getName :: [User] -> UserID -> Maybe T.Text
+getName (p:ps) uID
+  | uID == (_userID p) = Just (_name p)
+  | otherwise = getName ps uID
+getName [] _ = Nothing
+
+
+getUserRoleTeam :: UserID -> GameState -> Maybe (T.Text, Team)
+getUserRoleTeam uID gs = do
+  let x = checkSpeaker
+  case (snd x) of
+    Just t -> Just (T.pack $ fst x, t)
+    Nothing -> Nothing
+  where checkSpeaker
+          | justTrue $ isSpeaker gs uID =
+              ("Speaker", isSpeaker gs uID)
+          | otherwise = checkGuesser
+        checkGuesser
+          | justTrue $ isGuesser gs uID =
+              ("Guesser", isGuesser gs uID)
+          | otherwise = checkListener
+        checkListener
+          | justTrue $ isListener gs uID =
+              ("Listener", isListener gs uID)
+          | otherwise = ("", Nothing)
+
+
+justTrue :: Maybe a -> Bool
+justTrue (Just _) = True
+justTrue _ = False
+
+gameBoardUI :: CodewordsM t m => UserID
+  -> Dynamic t GameState -> m (Event t Codeword)
+gameBoardUI uID gs = elClass "div" "grid grid-cols-5 gap-4 p-4 h-full" $ do
+  eList <- simpleList (_gameBoard <$> gs) (codewordUI uID gs)
   return $ switchDyn $ leftmost <$> eList
 
-codewordUI :: CodewordsM t m => Player -> Dynamic t Team
-  -> Dynamic t TurnPhase -> Dynamic t Codeword -> m (Event t Codeword)
-codewordUI p t' tP c = do
-  (e, _) <- elDynClass' "div" (mkStyle <$> c) $ dynText
+codewordUI :: CodewordsM t m => UserID -> Dynamic t GameState
+  -> Dynamic t Codeword -> m (Event t Codeword)
+codewordUI uID gs c = do
+  (e, _) <- elDynClass' "div" (mkStyle <$> c <*> gs) $ dynText
     $ _word <$> c
 
-  clickE <- dyn $ (isGuesser p c e) <$> tP <*> t'
-  switchHold never clickE
+  let mTeam = (flip isGuesser uID) <$> gs
+      cTeam = _currentTurn <$> gs
+      bCGuesser = ifCurrentTurnRole <$> mTeam <*> cTeam
+      clickE = gate (current bCGuesser) $ tag (current c) $ domEvent Click e
 
-  where isGuesser (Player Guesser pT _) c' e' (Guessing _) tTurn =
-          doIfTrue c' e' $ tTurn == pT
-        isGuesser _ _ _ _ _ = return never
+  return clickE
+  where mkStyle c' gs' = "p-4 flex justify-center rounded-lg items-center "
+                <> (styleCard uID c' gs')
 
-        doIfTrue c2 e2 True = return $ tag (current c2) $ domEvent Click e2
-        doIfTrue _ _ False = return never
+ifCurrentTurnRole :: Maybe Team -> Team -> Bool
+ifCurrentTurnRole (Just userT) currentT
+  | userT == currentT = True
+  | otherwise = False
+ifCurrentTurnRole Nothing _ = False
 
-        mkStyle c' = "p-4 flex justify-center rounded-lg items-center "
-                <> styleCard (_role p) c'
 
 displayCodewords :: CodewordsM t m => User
  -> Dynamic t GameState -> m (Event t Codeword)
-displayCodewords u gs = do
-  let mP = getPlayer u <$> gs
-  clientMsg <- dyn $ ffor mP $ \case
-    Just p -> gameBoardUI p (_turnPhase <$> gs) (_gameBoard <$> gs) (_currentTurn <$> gs)
-    Nothing -> el "div" $ text "err at displayCodewords" >> return never
-  switchHold never clientMsg
+displayCodewords u gs = gameBoardUI (_userID u) gs
 
 displayGameBoard :: CodewordsM t m => User
   -> Dynamic t (Maybe GameState) -> m (Event t Codeword)
@@ -340,21 +395,16 @@ displaySideBar :: CodewordsM t m => Int -> User
 displaySideBar n u r = do
   e <- dyn $ ffor (_roomGameState <$> r) $ \case
     Just gs -> do
-      let currentP = getPlayer u gs
-          currentTeam = _currentTurn gs
-          tPhase = _turnPhase gs
-      case currentP of
-        Just p -> do
-          let pr = _role p
-              pt = _team p
-          ifSpeakerClue pr tPhase (currentTeam == pt) gs
-        Nothing -> displayRoomChat n u r
+      let bCSpeaker = ifCurrentTurnRole
+                        (isSpeaker gs (_userID u)) (_currentTurn gs)
+      case (bCSpeaker && (isCluePicking $ _turnPhase gs)) of
+        True -> displaySpeakerView n (_gameBoard gs)
+        False -> displayRoomChat n u r
 
     Nothing -> displayRoomChat n u r
   switchHold never e
-
-  where ifSpeakerClue Speaker CluePicking True gs' = displaySpeakerView n (_gameBoard gs')
-        ifSpeakerClue _ _ _ _ = displayRoomChat n u r
+  where isCluePicking CluePicking = True
+        isCluePicking _ = False
 
 parseHintInput :: Board -> T.Text -> Int
   -> Either InvalidHintInput Clue
@@ -384,7 +434,7 @@ hintErrMsg ContainsCodeword = "Hint cannot contain a codeword!"
 
 displaySpeakerView :: CodewordsM t m => Int
   -> Board -> m (Event t ClientMsg)
-displaySpeakerView n gb = mdo
+displaySpeakerView n gb = do
   elClass "div" "flex flex-col justify-between bg-gray-600 \
     \ h-full text-center" $ mdo
 
@@ -428,7 +478,7 @@ displaySpeakerView n gb = mdo
 
     switchHold never cMsg
 
-    where btn label fn = mdo
+    where btn label fn = do
             (e, _) <- el' "button" $ text label
             return $ fn <$ domEvent Click e
 
@@ -452,48 +502,52 @@ displayTopMessageBar r = do
     dyn_ $ ffor (_roomGameState <$> r) $ \case
       Just gs -> do
         case (_winner gs) of
-          True -> do
-            elClass "span" (teamColor $ _currentTurn gs) $
-              text $ T.pack $ show $ _currentTurn gs
+          Just t -> do
+            elClass "span" (teamColor t) $
+              text $ T.pack $ show t
             text " team wins!"
-          False ->
-            turnPhaseMsg gs $ _turnPhase gs
+          Nothing -> do
+            let rPs = _roomPlayers <$> r
+            dyn_ $ (turnPhaseMsg gs (_turnPhase gs)) <$> rPs
 
       Nothing -> do
-        -- TODO: How to do this differently?
-        text "Waiting on "
-        elDynClass "span" "text-yellow-300" $ dynText $
-          _name._roomAdmin <$> r
-        text " to start the game"
-
+        let rPs = (NE.toList._roomPlayers) <$> r
+            adminID = _roomAdminID <$> r
+        dyn_ $ ffor (getName <$> rPs <*> adminID) $ \case
+          Just p -> do
+            text "Waiting on "
+            elClass "span" "text-yellow-300" $ text p
+            text " to start the game"
+          Nothing ->
+            text "Could not get admin name"
     return ()
   return ()
 
-turnPhaseMsg :: CodewordsM t m => GameState -> TurnPhase -> m ()
-turnPhaseMsg gs CluePicking = do
-  case (getCurrentRole Speaker gs) of
+turnPhaseMsg :: CodewordsM t m =>
+  GameState -> TurnPhase -> NonEmpty User -> m ()
+turnPhaseMsg gs CluePicking ps = do
+  case (getCurrentSpeakerName gs ps) of
     Just p -> do
-      elClass "span" (teamColor $ _team p)
-        $ text $ _name $ _user p
+      elClass "span" (teamColor $ _currentTurn gs)
+        $ text p
       text  " is thinking of a hint."
       return ()
     Nothing ->
       text "Cannot find Speaker"
-turnPhaseMsg gs (Guessing (Clue h r _)) = do
+turnPhaseMsg gs (Guessing (Clue h rWords _)) ps = do
   elClass "span" "flex justify-between w-full px-2" $ do
     el "div" $ do
       elClass "span" "color-red-600" $ text $ "HINT: " <> h
 
     el "div" $ do
       text "Guesser: "
-      case (getCurrentRole Guesser gs) of
+      case (getCurrentGuesserName gs ps) of
         Just p ->
-          elClass "span" (teamColor $ _team p) $ text
-            $ _name $ _user p
+          elClass "span" (teamColor $ _currentTurn gs) $ text p
         Nothing ->
-          text "Cannot find Guesser"
+          el "div" $ text "Cannot find Guesser"
 
-    el "div" $ text $ "RELATED WORDS: " <> tShow r
+    el "div" $ text $ "RELATED WORDS: " <> tShow rWords
 
 teamColor :: Team -> T.Text
 teamColor Blue = "text-blue-600"
@@ -506,8 +560,8 @@ displayRoom n r u v = do
   dynText :: hoogle => Dynamic t Text -> m ()
   -}
   elClass "div" "flex flex-col h-screen select-none" $ do
-    let rAdmin = fmap _roomAdmin r
-    let adminStatus = isUserAdmin rAdmin (return u)
+    let rAdminID = fmap _roomAdminID r
+    let adminStatus = isUserAdmin rAdminID (return u)
     elClass "div" "flex justify-center bg-gray-700 xl:h-16 \
       \ 2xl:h-8 rounded lg:text-5xl" $
       text "GET UR BEEG YOSHI HERE"
@@ -524,7 +578,7 @@ displayRoom n r u v = do
                 elClass "button" "ml-2 px-1 bg-gray-600 rounded-lg" $ text "Change"
               elClass "div" "lg:px-10 2xl:px-3 bg-gray-600 rounded-full" $ text "?"
 
-            displayRoomUsers rAdmin (fmap _roomPlayers r)
+            displayRoomUsers rAdminID (fmap _roomPlayers r)
 
             elClass "div" "flex flex-row justify-between h-1/6" $ do
               let btnStyles = "m-2 p-1 bg-gray-600 rounded-lg"
@@ -546,7 +600,7 @@ displayRoom n r u v = do
 
       return $ leftmost [cMsg, btn]
 
-isUserAdmin :: Reflex t => Dynamic t User
+isUserAdmin :: Reflex t => Dynamic t UserID
   -> Dynamic t User -> Dynamic t Bool
   {-
   (<*>) :: f (a -> b) -> f a -> f b
@@ -558,7 +612,7 @@ isUserAdmin :: Reflex t => Dynamic t User
          a <- as
          pure (f a)
   -}
-isUserAdmin admin u = (==) <$> (fmap _userID u) <*> (fmap _userID admin)
+isUserAdmin adminID u = (==) <$> (fmap _userID u) <*> adminID
 
 displayIfAdmin :: CodewordsM t m => Dynamic t Bool -> m b -> m b
   -> m (Event t b)
@@ -594,13 +648,13 @@ displayRoomCard r = do
   return $ tag (current $ fmap fst r) $ domEvent Click e
 
 
-displayRoomUsers :: CodewordsM t m => Dynamic t User
+displayRoomUsers :: CodewordsM t m => Dynamic t UserID
   -> Dynamic t (NonEmpty User) -> m ()
-displayRoomUsers admin users = elClass "div" "px-4 h-full" $ do
+displayRoomUsers adminID users = elClass "div" "px-4 h-full" $ do
   elClass "div" "flex justify-center py-2" $ text "Players"
   elClass "div" "grid grid-cols-2 gap-4 px-2" $
     simpleList (fmap (reverse.NE.toList) users) (\u -> do
-        let adminStatus = isUserAdmin admin u
+        let adminStatus = isUserAdmin adminID u
         let defaultStyle = "px-2 bg-gray-400 rounded"
         elDynClass "div" (T.append <$> (defaultStyle) <*>
           (fmap makeAdminStyle adminStatus)) $ dynText $ fmap _name u
@@ -764,7 +818,7 @@ frontend = Frontend
       -- <meta name="viewport" content="width=device-width, initial-scale=1">
       elAttr "meta" ("name" =: "viewport" <> "content" =: "width=device-width, \
         \initial-scale=1") blank
-  , _frontend_body = elClass "div" "w-screen h-screen bg-gray-500" $ mdo
+  , _frontend_body = elClass "div" "w-screen h-screen bg-gray-500" $ do
 
       {- Counter
       counter <- foldDyn (+) (0 :: Integer) $ leftmost [(1 <$ clickEvent), ((-1) <$ clickEventG)]

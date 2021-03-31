@@ -18,6 +18,7 @@ data ClientMsg
   | StartGame Int
   | ChangeGameState Int Codeword
   | SendClue Int Clue
+  deriving Show
 
 data ServerMsg
   = GameStarted Int

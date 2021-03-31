@@ -182,7 +182,7 @@ makeNewRoom :: User -> T.Text -> Maybe Password -> Room
 makeNewRoom u n p = Room (_userID u) [] n p (pure u) Nothing
 
 randomizeList :: Show a => [a] -> IO [a]
-randomizeList !board = swapRandom board (99 :: Int)
+randomizeList board = swapRandom board (99 :: Int)
   where swapRandom b 0 = return b
         swapRandom b n = do
           x <- randomRIO (0, (lengthWords) - 1)

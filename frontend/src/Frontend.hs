@@ -26,6 +26,9 @@ import qualified Data.IntMap as M
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text as T
 
+import qualified Debug.Trace as DBUG
+import Reflex.Class as R
+
 import Obelisk.Frontend
 import Obelisk.Route
 import Obelisk.Generated.Static
@@ -62,6 +65,7 @@ data InvalidHintInput
   | MultipleWords
   | InvalidChars
   | ContainsCodeword
+  deriving Show
 
 codeWordsSocket :: CodewordsM t m
   => Event t ClientMsg -> m (Event t ServerMsg)
@@ -435,24 +439,23 @@ hintErrMsg ContainsCodeword = "Hint cannot contain a codeword!"
 displaySpeakerView :: CodewordsM t m => Int
   -> Board -> m (Event t ClientMsg)
 displaySpeakerView n gb = do
-  elClass "div" "flex flex-col justify-between bg-gray-600 \
+  cMsg <- elClass "div" "flex flex-col justify-between bg-gray-600 \
     \ h-full text-center" $ mdo
 
     elClass "div" "" $ text "Give your team a one word hint!"
 
-    cMsg <- elClass "div" "" $ do
+    eitherC <- elClass "div" "" $ do
       elClass "div" "" $ text "HINT"
       h <- inputElement $ def
 
       let elVal = _inputElement_value h
           eitherClue = (parseHintInput gb) <$> elVal <*> guesses
-      dyn $ ffor eitherClue $ \case
+      dyn_ $ ffor eitherClue $ \case
         Left a -> do
           elClass "div" "bg-red-300" $ text $ hintErrMsg a
-          return never
+        _ -> return ()
 
-        Right c ->
-          return $ (SendClue n c) <$ (domEvent Click submitE)
+      return eitherClue
 
     guesses <- elClass "div" "" $ do
       elClass "div" "" $ text "RELATED WORDS TO HINT"
@@ -466,26 +469,30 @@ displaySpeakerView n gb = do
           increment <- btn "▲" incFn
           decrement <- btn "▼" decFn
 
-          return $ leftmost [increment, decrement]
+          return $ leftmost [
+              increment
+            , decrement]
 
         return dInt'
       return g
 
 
     let btnColor = "bg-gray-400"
-    (submitE, _) <- elClass' "button" btnColor $
-      text "SUBMIT HINT"
+    (e, _) <- elClass' "button" btnColor (text "SUBMIT HINT")
+    dyn $ ffor eitherC $ \case
+          Right c ->  return $ R.traceEvent ("-----------Clue event fired!")
+            $ (SendClue n c) <$ domEvent Click e
+          Left _ -> return never
 
-    switchHold never cMsg
+  switchHold never cMsg
+  where btn label fn = do
+          (e, _) <- el' "button" $ text label
+          return $ fn <$ (R.traceEvent "btn click fired" $ domEvent Click e)
 
-    where btn label fn = do
-            (e, _) <- el' "button" $ text label
-            return $ fn <$ domEvent Click e
-
-          incFn 9 = 9
-          incFn x = x + 1
-          decFn 0 = 0
-          decFn x = subtract 1 x
+        incFn 9 = 9
+        incFn x = x + 1
+        decFn 0 = 0
+        decFn x = subtract 1 x
 
 
 displayRoomChat :: CodewordsM t m => Int -> User
@@ -534,7 +541,7 @@ turnPhaseMsg gs CluePicking ps = do
       return ()
     Nothing ->
       text "Cannot find Speaker"
-turnPhaseMsg gs (Guessing (Clue h rWords _)) ps = do
+turnPhaseMsg gs (Guessing (Clue h rWords _)) ps =
   elClass "span" "flex justify-between w-full px-2" $ do
     el "div" $ do
       elClass "span" "color-red-600" $ text $ "HINT: " <> h
@@ -726,13 +733,13 @@ inputTextBoxBtnWidget btnText style = mdo
 
   (e, _) <- elClass' "button" "bg-gray-100" $ text btnText
 
-  let clicked = domEvent Click e
-      enter = keypress Enter (_inputElement_element
+  let clicked = R.traceEvent ("-----------input Click Event") $ domEvent Click e
+      enter = R.traceEvent ("-----------input Enter Event") $ keypress Enter (_inputElement_element
         inputTextBox)
       send = leftmost [clicked, enter]
       elVal = _inputElement_value inputTextBox
 
-  return $ tag (current elVal) send
+  return $ R.traceEvent ("-----------inputTextBoxBtnWidget Triggered") $ tag (current elVal) send
 
 signInWidget :: CodewordsM t m => m (Event t ClientMsg)
 signInWidget = do
@@ -871,12 +878,12 @@ frontend = Frontend
             firstOf and ^?, which are similar with some subtle
             differences (explained below).
         -}
-        serverMsg <- codeWordsSocket clientMsg
+        serverMsg <- codeWordsSocket newClientMsg
 
-        currentView <- foldDyn changeView SignIn serverMsg
-        currentView' <- holdUniqDyn currentView
-        newServerMsg <- dyn $ router roomList <$> currentView'
-        clientMsg <- switchHold never newServerMsg
+        dView <- foldDyn changeView SignIn serverMsg
+        dView' <- holdUniqDyn dView
+        clientMsg <- dyn $ router roomList <$> dView'
+        newClientMsg <- switchHold never clientMsg
 
         roomList <- roomsWidget (fmapMaybe (preview _RoomList) serverMsg)
           (leftmost [fmapMaybe (preview _RoomChanged) serverMsg

@@ -26,7 +26,6 @@ import qualified Data.IntMap as M
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Text as T
 
-import qualified Debug.Trace as DBUG
 import Reflex.Class as R
 
 import Obelisk.Frontend
@@ -82,6 +81,7 @@ codeWordsSocket send = do
       Inject a value into the monadic type.
   -}
   rawWebsocket <- jsonWebSocket "wss://codewords.app/websocket" $ def
+  --rawWebsocket <- jsonWebSocket "ws://localhost:8000/websocket" $ def
     & webSocketConfig_send .~ (fmap pure send)
 
   return $ fmapMaybe id $ _webSocket_recv rawWebsocket

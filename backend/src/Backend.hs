@@ -198,29 +198,37 @@ handleClientMsg state mUser cMsg sendFn connection = do
     StartGame roomID -> do
       case mUser of
         Just u -> do
-          mRoom <- updateFn roomID $ appendRoomChatMsg $
-            RoomChatMessage systemUser $
-              (_name u) <> " has started the game."
+          mRoom <- roomExist (rooms state) roomID
+          case (enoughPlayers mRoom) of
+            True -> do
+              mRoom' <- updateFn roomID $ appendRoomChatMsg $
+                RoomChatMessage systemUser $
+                  (_name u) <> " has started the game."
 
-          case mRoom of
-            Just r -> do
-              let rPlayers = NE.toList $ _roomPlayers r
+              case mRoom' of
+                Just r -> do
+                  let rPlayers = NE.toList $ _roomPlayers r
 
-              newGameState <- startNewGame rPlayers
-              mNewRoom <- updateFn roomID $ updateRoomGameState newGameState
+                  newGameState <- startNewGame rPlayers
+                  mNewRoom <- updateFn roomID $ updateRoomGameState newGameState
 
-              case mNewRoom of
-                Just _ -> do
-                  usConnected <- readTVarIO (usersConnected state)
-                  sendUsersServerMsg rPlayers (GameStarted roomID)
-                    usConnected
+                  case mNewRoom of
+                    Just _ -> do
+                      usConnected <- readTVarIO (usersConnected state)
+                      sendUsersServerMsg rPlayers (GameStarted roomID)
+                        usConnected
+
+                    Nothing ->
+                      return ()
 
                 Nothing ->
                   return ()
 
-            Nothing ->
+            False -> do
+              updateFn roomID $ appendRoomChatMsg $
+                RoomChatMessage systemUser $ "You need at \
+                \ least 4 players to start the game!"
               return ()
-
         Nothing ->
           return ()
 
@@ -253,6 +261,11 @@ handleClientMsg state mUser cMsg sendFn connection = do
 
       return mUser
 
+enoughPlayers :: Maybe (Room) -> Bool
+enoughPlayers (Just r)
+  | (NE.length $ _roomPlayers r) > 3 = True
+  | otherwise = False
+enoughPlayers _ = False
 
 revealCIfNotAlr :: Codeword -> GameState -> Int -> ServerState
   -> IO ()

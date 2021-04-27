@@ -18,6 +18,9 @@ library
                , obelisk-executable-config-lookup
                , obelisk-generated-static
                , text
+  if impl(ghcjs)
+    build-depends: ghcjs-base
+
   exposed-modules:
     Frontend
   ghc-options: -Wall -fno-show-valid-hole-fits -fno-warn-unused-do-bind -Wredundant-constraints -Wincomplete-uni-patterns -Wincomplete-record-updates -O

@@ -9,9 +9,16 @@ library
     buildable: False
   build-depends: base
                , common
+               , aeson
+               , containers
+               , text
+               , random
                , frontend
+               , lens
                , obelisk-backend
                , obelisk-route
+               , safe
+               , stm
                , websockets
                , websockets-snap
   exposed-modules:

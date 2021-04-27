@@ -7,10 +7,13 @@ library
   hs-source-dirs: src
   build-depends: base
                , common
+               , containers
                , obelisk-frontend
                , obelisk-route
                , ilist
                , jsaddle
+               , lens
+               , reflex
                , reflex-dom
                , obelisk-executable-config-lookup
                , obelisk-generated-static

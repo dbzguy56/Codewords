@@ -9,7 +9,7 @@ import Control.Lens
 import Data.Aeson.TH
 import Data.Aeson.Types (FromJSONKey, ToJSONKey)
 import qualified Data.Text as T
-import Data.List.Index
+import Data.List.Index (setAt)
 import Data.List.NonEmpty (NonEmpty)
 import Data.Set (Set)
 import qualified Data.Set as S

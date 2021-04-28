@@ -12,12 +12,13 @@ import Data.Text (Text)
 data ClientMsg
   = CreateName Text
   | CreateRoom Text (Maybe Password)
-  | SendRoomChatMsg Int RoomChatMessage
+  | ChangeGameState Int Codeword
+  | EndTurn Int
   | JoinRoom Int
   | LeaveRoom Int
-  | StartGame Int
-  | ChangeGameState Int Codeword
   | SendClue Int Clue
+  | SendRoomChatMsg Int RoomChatMessage
+  | StartGame Int
   deriving Show
 
 data ServerMsg

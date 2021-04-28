@@ -80,8 +80,8 @@ codeWordsSocket send = do
     return :: a -> m a
       Inject a value into the monadic type.
   -}
-  rawWebsocket <- jsonWebSocket "wss://codewords.app/websocket" $ def
-  --rawWebsocket <- jsonWebSocket "ws://localhost:8000/websocket" $ def
+  --rawWebsocket <- jsonWebSocket "wss://codewords.app/websocket" $ def
+  rawWebsocket <- jsonWebSocket "ws://localhost:8000/websocket" $ def
     & webSocketConfig_send .~ (fmap pure send)
 
   return $ fmapMaybe id $ _webSocket_recv rawWebsocket
@@ -180,7 +180,7 @@ roomChatWidget u r = do
   e <- dyn $ ffor (_roomGameState <$> r) $ \case
     Just gs -> do
       case (isSpeaker gs $ _userID u) of
-        Just _ -> speakerChat
+        Just _ -> speakerInput $ _winner gs
         Nothing -> showInput
     Nothing -> showInput
   switchHold never e
@@ -190,9 +190,8 @@ roomChatWidget u r = do
             "Send" "width:85%"
           return $ fmap (RoomChatMessage u) eventText
 
-        speakerChat = elClass "div" "flex flex-row" $
-            text "Speakers can't talk" >> return never
-
+        speakerInput (Just _) = showInput
+        speakerInput _ = return never
 
 isSpeaker :: GameState -> UserID -> Maybe Team
 isSpeaker gs uID
@@ -212,16 +211,16 @@ isListener gs uID
   | elem uID $ _redListeners $ _listeners gs = Just Red
   | otherwise = Nothing
 
-styleCard :: UserID -> Codeword -> GameState -> T.Text
-styleCard uID (Codeword _ o r) gs
-    | r == True = T.pack $ (++) (color o) "700"
-    | justTrue $ isSpeaker gs uID =
-        T.pack $ (++) (color o) "300"
-    | otherwise = T.pack $ "bg-gray-400"
-    where color Bystander = "bg-green-"
-          color Killer = "bg-gray-"
-          color (TeamOwned Red) = "bg-red-"
-          color (TeamOwned Blue) = "bg-blue-"
+styleCard :: Maybe Team -> Codeword -> GameState -> T.Text
+styleCard _ (Codeword _ o True) _ = T.pack $ (++) (cardColor o) "700"
+styleCard (Just _) (Codeword _ o _) _ = T.pack $ (++) (cardColor o) "300"
+styleCard _ _ _ = T.pack $ "bg-gray-400"
+
+cardColor :: Ownership -> [Char]
+cardColor Bystander = "bg-green-"
+cardColor Killer = "bg-gray-"
+cardColor (TeamOwned Red) = "bg-red-"
+cardColor (TeamOwned Blue) = "bg-blue-"
 
 displayRoleBar :: CodewordsM t m => User
   -> Dynamic t (Maybe GameState) -> m ()
@@ -311,8 +310,13 @@ codewordUI uID gs c = do
       clickE = gate (current bCGuesser) $ tag (current c) $ domEvent Click e
 
   return clickE
-  where mkStyle c' gs' = "p-4 flex justify-center rounded-lg items-center "
-                <> (styleCard uID c' gs')
+  where mkStyle c' gs' =
+          case (_winner gs') of
+            Just _ -> "p-4 flex justify-center rounded-lg items-center "
+              <> (styleCard (Just Blue) c' gs')
+            Nothing -> "p-4 flex justify-center rounded-lg items-center "
+              <> (styleCard (isSpeaker gs' uID) c' gs')
+
 
 ifCurrentTurnRole :: Maybe Team -> Team -> Bool
 ifCurrentTurnRole (Just userT) currentT
@@ -365,14 +369,14 @@ displayGameBoard u mGS = do
         return never
   switchHold never codewordE
 
-displayBottomBar :: CodewordsM t m => User -> Int
+displayBottomBar :: CodewordsM t m => UserID -> Int
   -> Dynamic t (Maybe GameState) -> m (Event t ClientMsg)
-displayBottomBar _ n mGS = do
+displayBottomBar uID roomID mGS = do
   elClass "div" "flex" $ do
     backBtn <- elClass "span" "" $
       btnWidget "bg-gray-600" "Leave"
 
-    dyn_ $ ffor mGS $ \case
+    endBtn <- dyn $ ffor mGS $ \case
       Just gs -> do
         elClass "span" "flex flex-col text-base" $ do
           elClass "span" "text-center" $ text "CARDS LEFT"
@@ -383,18 +387,24 @@ displayBottomBar _ n mGS = do
             elClass "span" "text-red-600" $ text "RED: "
             elClass "span" "" $ text $ tShow $ _redCards $ _cardsLeft gs
 
-        ifGuessing $ _turnPhase gs
+        ifGuessing (ifCurrentTurnRole (isGuesser gs uID) (_currentTurn gs))
+          roomID $ _turnPhase gs
 
       Nothing -> return never
 
-    return $ leftmost [LeaveRoom n <$ backBtn]
+    endBtn' <- switchHold never endBtn
+    return $ leftmost [endBtn', LeaveRoom roomID <$ backBtn]
 
-ifGuessing :: CodewordsM t m => TurnPhase -> m (Event t ())
-ifGuessing (Guessing (Clue _ _ g)) = do
+ifGuessing :: CodewordsM t m => Bool -> Int -> TurnPhase -> m (Event t ClientMsg)
+ifGuessing currentG roomID (Guessing (Clue _ _ g)) = do
         elClass "span" "" $ text $ "GUESSES LEFT: " <> (tShow g)
-        elClass "span" "" $ btnWidget "bg-gray-600" "END TURN"
-        return never
-ifGuessing _ = return never
+        endTurnBtnFn currentG
+
+  where endTurnBtnFn True = do
+          btn <- elClass "span" "" $ btnWidget "bg-gray-600" "END TURN"
+          return $ EndTurn roomID <$ btn
+        endTurnBtnFn False = return never
+ifGuessing _ _ _ = return never
 
 gameBoardWidget :: CodewordsM t m => Int -> Dynamic t Room
   -> User -> m (Event t ClientMsg)
@@ -420,7 +430,7 @@ gameBoardWidget n r u = do
   -}
   displayRoleBar u (_roomGameState <$> r)
   codeword <- displayGameBoard u (_roomGameState <$> r)
-  bottomE <- displayBottomBar u n (_roomGameState <$> r)
+  bottomE <- displayBottomBar (_userID u) n (_roomGameState <$> r)
   return $ leftmost [ChangeGameState n <$> codeword,
     bottomE]
 
@@ -525,7 +535,7 @@ displaySpeakerView n gb = do
           (e, _) <- el' "button" $ text label
           return $ fn <$ (R.traceEvent "btn click fired" $ domEvent Click e)
 
-        incFn 9 = 9
+        incFn 8 = 8
         incFn x = x + 1
         decFn 0 = 0
         decFn x = subtract 1 x
@@ -775,7 +785,13 @@ inputTextBoxBtnWidget btnText style = mdo
       send = leftmost [clicked, enter]
       elVal = _inputElement_value inputTextBox
 
-  return $ R.traceEvent ("-----------inputTextBoxBtnWidget Triggered") $ tag (current elVal) send
+  e' <- dyn $ ffor (notEmpty <$> elVal) $ \case
+    True -> return never
+    False -> return $ R.traceEvent ("-----------inputTextBoxBtnWidget Triggered") $ tag (current elVal) send
+  switchHold never e'
+  where notEmpty t
+          | (T.strip t) == "" = True
+          | otherwise = False
 
 signInWidget :: CodewordsM t m => m (Event t ClientMsg)
 signInWidget = do

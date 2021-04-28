@@ -235,13 +235,14 @@ handleClientMsg state mUser cMsg sendFn connection = do
       return mUser
 
     ChangeGameState roomID codeword -> do
-
       mRoom <- roomExist (rooms state) roomID
       case mRoom of
         Just r ->
           case (_roomGameState r) of
             Just gs -> do
-              revealCIfNotAlr codeword gs roomID state
+              case (ifGuessingPhase (_winner gs) $ _turnPhase gs) of
+                True -> revealCIfNotAlr codeword gs roomID state
+                False -> return ()
             Nothing -> return ()
         Nothing -> return ()
 
@@ -260,6 +261,29 @@ handleClientMsg state mUser cMsg sendFn connection = do
         Nothing -> return ()
 
       return mUser
+
+    EndTurn roomID -> do
+      mRoom <- roomExist (rooms state) roomID
+      case mRoom of
+        Just r ->
+          case (_roomGameState r) of
+            Just gs -> do
+              case (ifGuessingPhase (_winner gs) $ _turnPhase gs) of
+                True -> do
+                  newGS <- atomically $ stateTVar (pureGen state) $ \pGen ->
+                    newTurn gs pGen
+                    
+                  updateFn roomID $ updateRoomGameState newGS
+                  return()
+                False -> return ()
+            Nothing -> return ()
+        Nothing -> return ()
+
+      return mUser
+
+ifGuessingPhase :: Maybe Team -> TurnPhase -> Bool
+ifGuessingPhase Nothing (Guessing _) = True
+ifGuessingPhase _ _ = False
 
 enoughPlayers :: Maybe (Room) -> Bool
 enoughPlayers (Just r)

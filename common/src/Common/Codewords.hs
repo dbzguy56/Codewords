@@ -252,7 +252,7 @@ revealCodeword c@Codeword{..} gs gen =
   in
   case (_winner newGS) of
     Just _ -> (newGS, gen)
-    Nothing -> makeNewTurn c newGS (_turnPhase newGS) gen
+    Nothing -> makeNewTurn _owner newGS (_turnPhase newGS) gen
   where reveal (gb:gbs)
           | gb == c = c {_revealed = True} : reveal gbs
           | otherwise = gb : reveal gbs
@@ -307,9 +307,9 @@ switchGuesser oldG ls gen =
     Just p -> (p, S.insert oldG $ S.delete p ls, newGen)
     Nothing -> (oldG, ls, gen)
 
-makeNewTurn :: Codeword -> GameState -> TurnPhase -> StdGen
+makeNewTurn :: Ownership -> GameState -> TurnPhase -> StdGen
   -> (GameState, StdGen)
-makeNewTurn (Codeword _ (TeamOwned t) _) gs (Guessing (Clue _ _ g)) pGen
+makeNewTurn (TeamOwned t) gs (Guessing (Clue _ _ g)) pGen
  | t /= (_currentTurn gs) = newTurn gs pGen
  | g == 0 = newTurn gs pGen
  | otherwise = (gs, pGen)

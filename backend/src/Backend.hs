@@ -272,7 +272,7 @@ handleClientMsg state mUser cMsg sendFn connection = do
                 True -> do
                   newGS <- atomically $ stateTVar (pureGen state) $ \pGen ->
                     newTurn gs pGen
-                    
+
                   updateFn roomID $ updateRoomGameState newGS
                   return()
                 False -> return ()

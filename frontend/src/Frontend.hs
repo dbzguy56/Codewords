@@ -19,8 +19,9 @@ import Control.Monad
 import Control.Monad.Fix
 import Control.Monad.IO.Class
 
-import Data.IntMap (IntMap, insert, delete)
+import Data.Bool (bool)
 import Data.Char (isAlpha)
+import Data.IntMap (IntMap, insert, delete)
 import Data.List.NonEmpty (NonEmpty)
 import qualified Data.IntMap as M
 import qualified Data.List.NonEmpty as NE
@@ -47,6 +48,7 @@ type CodewordsM t m = ( DomBuilder t m , PostBuild t m , TriggerEvent t m
                       , MonadSample t (Performable m)
                       , HasWebView m
                       )
+
 
 data View
   = SignIn
@@ -167,8 +169,7 @@ roomChatWidget u r = do
    Create a DOM element with a Dynamic class and return the element
   -}
   elClass "div" "bg-gray-300 flex flex-col-reverse h-1/3 lg:h-full overflow-auto" $
-    elClass "div" "flex flex-col break-all \
-      \ " $
+    elClass "div" "flex flex-col break-all" $
       simpleList (fmap (reverse._roomChat) r) (\rChat -> do
         el "div" $ do
           let uS = fmap userSpeaking rChat
@@ -177,13 +178,17 @@ roomChatWidget u r = do
           dynText $ fmap chatMessage rChat
         )
 
-  e <- dyn $ ffor (_roomGameState <$> r) $ \case
+  e <- maybeDyn (_roomGameState <$> r)
+  e' <- dyn $ ffor e $ \case
     Just gs -> do
-      case (isSpeaker gs $ _userID u) of
-        Just _ -> speakerInput $ _winner gs
-        Nothing -> showInput
+      e2 <- dyn $ ffor ((flip getRoleStatus $ _userID u) <$> gs) $ \case
+        SpeakerFor _ -> do
+          let w = _winner <$> gs
+          dyn (speakerInput <$> w) >>= switchHold never
+        _ -> showInput
+      switchHold never e2
     Nothing -> showInput
-  switchHold never e
+  switchHold never e'
 
   where showInput = elClass "div" "flex flex-row" $ do
           eventText <- inputTextBoxBtnWidget
@@ -193,27 +198,26 @@ roomChatWidget u r = do
         speakerInput (Just _) = showInput
         speakerInput _ = return never
 
-isSpeaker :: GameState -> UserID -> Maybe Team
-isSpeaker gs uID
-  | uID == (_blueSpeaker $ _speakers gs) = Just Blue
-  | uID == (_redSpeaker $ _speakers gs) = Just Red
-  | otherwise = Nothing
+data RoleStatus
+  = NotAnyRole
+  | SpeakerFor Team
+  | GuesserFor Team
+  | ListenerFor Team
 
-isGuesser :: GameState -> UserID -> Maybe Team
-isGuesser gs uID
-  | uID == (_blueGuesser $ _guessers gs) = Just Blue
-  | uID == (_redGuesser $ _guessers gs) = Just Red
-  | otherwise = Nothing
+getRoleStatus :: GameState -> UserID -> RoleStatus
+getRoleStatus gs uID
+  | uID == (_blueSpeaker $ _speakers gs) = SpeakerFor Blue
+  | uID == (_redSpeaker $ _speakers gs) = SpeakerFor Red
+  | uID == (_blueGuesser $ _guessers gs) = GuesserFor Blue
+  | uID == (_redGuesser $ _guessers gs) = GuesserFor Red
+  | elem uID $ _blueListeners $ _listeners gs = ListenerFor Blue
+  | elem uID $ _redListeners $ _listeners gs = ListenerFor Red
+  | otherwise = NotAnyRole
 
-isListener :: GameState -> UserID -> Maybe Team
-isListener gs uID
-  | elem uID $ _blueListeners $ _listeners gs = Just Blue
-  | elem uID $ _redListeners $ _listeners gs = Just Red
-  | otherwise = Nothing
 
-styleCard :: Maybe Team -> Codeword -> GameState -> T.Text
+styleCard :: RoleStatus -> Codeword -> GameState -> T.Text
 styleCard _ (Codeword _ o True) _ = T.pack $ (++) (cardColor o) "700"
-styleCard (Just _) (Codeword _ o _) _ = T.pack $ (++) (cardColor o) "300"
+styleCard (SpeakerFor _) (Codeword _ o _) _ = T.pack $ (++) (cardColor o) "300"
 styleCard _ _ _ = T.pack $ "bg-gray-400"
 
 cardColor :: Ownership -> [Char]
@@ -226,22 +230,22 @@ displayRoleBar :: CodewordsM t m => User
   -> Dynamic t (Maybe GameState) -> m ()
 displayRoleBar u mGS = do
   elClass "div" "flex justify-between" $ do
-    dyn_ $ ffor mGS $ \case
+    mGS' <- maybeDyn mGS
+    dyn_ $ ffor mGS' $ \case
       Just gs -> do
         elClass "div" "" $ do
           text "Current Turn: "
-          elClass "span" (teamColor $ _currentTurn gs) $
-            text $ tShow $ _currentTurn gs
+          elDynClass "span" (teamColor <$> (_currentTurn <$> gs)) $
+            dynText $ (tShow <$> (_currentTurn <$> gs))
 
-        let mURoleTeam = getUserRoleTeam (_userID u) gs
-
-        case mURoleTeam of
-          Just (role, t) -> do
+        mURoleTeam <- maybeDyn $ (getUserRoleTeam (_userID u)) <$> gs
+        dyn $ ffor mURoleTeam $ \case
+          Just dRT -> do
             elClass "div" "" $ do
               text "Your Role: "
-              elClass "span" (teamColor $ t) $
-                text $ tShow t
-              el "span" $ text $ T.append (T.pack "'s ") role
+              elDynClass "span" (teamColor.snd <$> dRT) $
+                dynText $ tShow.snd <$> dRT
+              el "span" $ dynText $ T.append (T.pack "'s ") <$> fst <$> dRT
 
           Nothing -> do
             el "span" $ text "Couldnt find player"
@@ -249,7 +253,7 @@ displayRoleBar u mGS = do
 
       Nothing -> do
         el "span" $ text "Gamestate does not exist:("
-        return ()
+        return never
 
 getCurrentGuesserName :: GameState -> NonEmpty User -> Maybe T.Text
 getCurrentGuesserName gs us = getName (NE.toList us) $ getUID (_currentTurn gs)
@@ -270,23 +274,11 @@ getName [] _ = Nothing
 
 getUserRoleTeam :: UserID -> GameState -> Maybe (T.Text, Team)
 getUserRoleTeam uID gs = do
-  let x = checkSpeaker
-  case (snd x) of
-    Just t -> Just (T.pack $ fst x, t)
-    Nothing -> Nothing
-  where checkSpeaker
-          | justTrue $ isSpeaker gs uID =
-              ("Speaker", isSpeaker gs uID)
-          | otherwise = checkGuesser
-        checkGuesser
-          | justTrue $ isGuesser gs uID =
-              ("Guesser", isGuesser gs uID)
-          | otherwise = checkListener
-        checkListener
-          | justTrue $ isListener gs uID =
-              ("Listener", isListener gs uID)
-          | otherwise = ("", Nothing)
-
+  role $ getRoleStatus gs uID
+  where role (SpeakerFor t) = Just ("Speaker", t)
+        role (GuesserFor t) = Just ("Guesser", t)
+        role (ListenerFor t) = Just ("Listener", t)
+        role _ = Nothing
 
 justTrue :: Maybe a -> Bool
 justTrue (Just _) = True
@@ -304,26 +296,18 @@ codewordUI uID gs c = do
   (e, _) <- elDynClass' "div" (mkStyle <$> c <*> gs) $ dynText
     $ _word <$> c
 
-  let mTeam = (flip isGuesser uID) <$> gs
+  let roleStatus = (flip getRoleStatus uID) <$> gs
       cTeam = _currentTurn <$> gs
-      bCGuesser = ifCurrentTurnRole <$> mTeam <*> cTeam
+      bCGuesser = isCurrentGuesser <$> roleStatus <*> cTeam
       clickE = gate (current bCGuesser) $ tag (current c) $ domEvent Click e
 
   return clickE
   where mkStyle c' gs' =
           case (_winner gs') of
             Just _ -> "p-4 flex justify-center rounded-lg items-center "
-              <> (styleCard (Just Blue) c' gs')
+              <> (styleCard (SpeakerFor Blue) c' gs')
             Nothing -> "p-4 flex justify-center rounded-lg items-center "
-              <> (styleCard (isSpeaker gs' uID) c' gs')
-
-
-ifCurrentTurnRole :: Maybe Team -> Team -> Bool
-ifCurrentTurnRole (Just userT) currentT
-  | userT == currentT = True
-  | otherwise = False
-ifCurrentTurnRole Nothing _ = False
-
+              <> (styleCard (getRoleStatus gs' uID) c' gs')
 
 displayCodewords :: CodewordsM t m => User
  -> Dynamic t GameState -> m (Event t Codeword)
@@ -376,35 +360,42 @@ displayBottomBar uID roomID mGS = do
     backBtn <- elClass "span" "" $
       btnWidget "bg-gray-600" "Leave"
 
-    endBtn <- dyn $ ffor mGS $ \case
+    mGS' <- maybeDyn mGS
+    endBtn <- dyn $ ffor mGS' $ \case
       Just gs -> do
         elClass "span" "flex flex-col text-base" $ do
           elClass "span" "text-center" $ text "CARDS LEFT"
           elClass "span" "" $ do
             elClass "span" "text-blue-600" $ text "BLUE: "
-            elClass "span" "" $ text $ tShow $ _blueCards $ _cardsLeft gs
+            elClass "span" "" $ dynText $ tShow._blueCards._cardsLeft <$> gs
 
             elClass "span" "text-red-600" $ text "RED: "
-            elClass "span" "" $ text $ tShow $ _redCards $ _cardsLeft gs
+            elClass "span" "" $ dynText $ tShow._redCards._cardsLeft <$> gs
 
-        ifGuessing (ifCurrentTurnRole (isGuesser gs uID) (_currentTurn gs))
-          roomID $ _turnPhase gs
+        ifGuessing (isCurrentGuesser <$>
+          ((flip getRoleStatus uID) <$> gs) <*> (_currentTurn <$> gs))
+          roomID (_turnPhase <$> gs)
 
       Nothing -> return never
 
     endBtn' <- switchHold never endBtn
     return $ leftmost [endBtn', LeaveRoom roomID <$ backBtn]
 
-ifGuessing :: CodewordsM t m => Bool -> Int -> TurnPhase -> m (Event t ClientMsg)
-ifGuessing currentG roomID (Guessing (Clue _ _ g)) = do
-        elClass "span" "" $ text $ "GUESSES LEFT: " <> (tShow g)
-        endTurnBtnFn currentG
+ifGuessing :: CodewordsM t m => Dynamic t Bool -> Int -> Dynamic t TurnPhase
+  -> m (Event t ClientMsg)
+ifGuessing dCurrentG roomID dTP = (dyn $ gPattern <$> dCurrentG <*> dTP) >>=
+  switchHold never
 
-  where endTurnBtnFn True = do
+  where gPattern currentG (Guessing (Clue _ _ g)) = do
+          elClass "span" "" $ text $ "GUESSES LEFT: "
+            <> (tShow g)
+          endTurnBtnFn currentG
+        gPattern _ _ = return never
+
+        endTurnBtnFn True = do
           btn <- elClass "span" "" $ btnWidget "bg-gray-600" "END TURN"
           return $ EndTurn roomID <$ btn
         endTurnBtnFn False = return never
-ifGuessing _ _ _ = return never
 
 gameBoardWidget :: CodewordsM t m => Int -> Dynamic t Room
   -> User -> m (Event t ClientMsg)
@@ -440,21 +431,35 @@ btnWidget style t = do
   (e, _)  <- elClass' "button" style $ text t
   return $ domEvent Click e
 
+isCurrentSpeaker :: RoleStatus -> Team -> Bool
+isCurrentSpeaker (SpeakerFor userT) currentT = userT == currentT
+isCurrentSpeaker _ _ = False
+
+isCurrentGuesser :: RoleStatus -> Team -> Bool
+isCurrentGuesser (GuesserFor userT) currentT = userT == currentT
+isCurrentGuesser _ _ = False
+
 displaySideBar :: CodewordsM t m => Int -> User
   -> Dynamic t Room -> m (Event t ClientMsg)
 displaySideBar n u r = do
-  e <- dyn $ ffor (_roomGameState <$> r) $ \case
+  rGS <- maybeDyn (_roomGameState <$> r)
+  e <- dyn $ ffor rGS $ \case
     Just gs -> do
-      let bCSpeaker = ifCurrentTurnRole
-                        (isSpeaker gs (_userID u)) (_currentTurn gs)
-      case (bCSpeaker && (isCluePicking $ _turnPhase gs)) of
-        True -> displaySpeakerView n (_gameBoard gs)
-        False -> displayRoomChat n u r
+      let dCSpeaker = isCurrentSpeaker <$> ((flip getRoleStatus $ _userID u) <$> gs)
+            <*> (_currentTurn <$> gs)
+          dSpeakerCluePicking = (&&) <$> dCSpeaker
+            <*> (isCluePicking <$> (_turnPhase <$> gs))
 
+      e' <- dyn $ ffor dSpeakerCluePicking $ \case
+        True -> (dyn $ displaySpeakerView n <$> (_gameBoard <$> gs))
+                  >>= switchHold never
+        False -> displayRoomChat n u r
+      switchHold never e'
     Nothing -> displayRoomChat n u r
   switchHold never e
   where isCluePicking CluePicking = True
         isCluePicking _ = False
+
 
 parseHintInput :: Board -> T.Text -> Int
   -> Either InvalidHintInput Clue
@@ -496,9 +501,10 @@ displaySpeakerView n gb = do
 
       let elVal = _inputElement_value h
           eitherClue = (parseHintInput gb) <$> elVal <*> guesses
-      dyn_ $ ffor eitherClue $ \case
+      eitherClue' <- eitherDyn eitherClue
+      dyn_ $ ffor eitherClue' $ \case
         Left a -> do
-          elClass "div" "bg-red-300" $ text $ hintErrMsg a
+          elClass "div" "bg-red-300" $ dynText $ hintErrMsg <$> a
         _ -> return ()
 
       return eitherClue
@@ -525,15 +531,18 @@ displaySpeakerView n gb = do
 
     let btnColor = "bg-gray-400"
     (e, _) <- elClass' "button" btnColor (text "SUBMIT HINT")
-    dyn $ ffor eitherC $ \case
-          Right c ->  return $ R.traceEvent ("-----------Clue event fired!")
-            $ (SendClue n c) <$ domEvent Click e
-          Left _ -> return never
 
-  switchHold never cMsg
+    eitherC' <- eitherDyn eitherC
+    e2 <- dyn $ ffor eitherC' $ \case
+      Right c ->
+        return $ tag (current $ SendClue n <$> c) $ domEvent Click e
+      Left _ -> return never
+    switchHold never e2
+
+  return cMsg
   where btn label fn = do
           (e, _) <- el' "button" $ text label
-          return $ fn <$ (R.traceEvent "btn click fired" $ domEvent Click e)
+          return $ fn <$ domEvent Click e
 
         incFn 8 = 8
         incFn x = x + 1
@@ -552,24 +561,28 @@ displayTopMessageBar :: CodewordsM t m => Dynamic t Room
 displayTopMessageBar r = do
   elDynClass "div" "flex whitespace-pre-wrap \
     \ justify-center bg-gray-600 h-auto lg:text-3xl" $ do
-    dyn_ $ ffor (_roomGameState <$> r) $ \case
+    rGs <- maybeDyn (_roomGameState <$> r)
+    dyn_ $ ffor rGs $ \case
       Just gs -> do
-        case (_winner gs) of
+        dWinner <- maybeDyn (_winner <$> gs)
+        dyn_ $ ffor dWinner $ \case
           Just t -> do
-            elClass "span" (teamColor t) $
-              text $ T.pack $ show t
+            elDynClass "span" (teamColor <$> t) $
+              dynText $ T.pack.show <$> t
             text " team wins!"
           Nothing -> do
             let rPs = _roomPlayers <$> r
-            dyn_ $ (turnPhaseMsg gs (_turnPhase gs)) <$> rPs
+            dyn_ $ turnPhaseMsg <$> gs <*> (_turnPhase <$> gs) <*> rPs
 
       Nothing -> do
         let rPs = (NE.toList._roomPlayers) <$> r
             adminID = _roomAdminID <$> r
-        dyn_ $ ffor (getName <$> rPs <*> adminID) $ \case
+
+        dAdminName <- maybeDyn (getName <$> rPs <*> adminID)
+        dyn_ $ ffor dAdminName $ \case
           Just p -> do
             text "Waiting on "
-            elClass "span" "text-yellow-300" $ text p
+            elClass "span" "text-yellow-300" $ dynText p
             text " to start the game"
           Nothing ->
             text "Could not get admin name"
@@ -606,6 +619,42 @@ teamColor :: Team -> T.Text
 teamColor Blue = "text-blue-600"
 teamColor Red = "text-red-600"
 
+openRoomInfoDialog :: CodewordsM t m =>
+  Event t Bool -> m ()
+openRoomInfoDialog eToggle = mdo
+  dOpen <- holdDyn False $ leftmost [eToggle, False <$ eClose]
+  let mkStyles b = T.intercalate " "
+        ["absolute flex justify-center \
+          \ backdrop-filter backdrop-blur-sm items-center inset-0"
+        , bool "opacity-0 pointer-events-none"
+          "opacity-100 pointer-events-auto" b]
+
+  eClose <- elDynClass "div" (mkStyles <$> dOpen) $ do
+    elClass "div" "bg-red-500 w-1/2 h-1/2" $ do
+      inputElement $ def
+        & inputElementConfig_elementConfig
+        . elementConfig_initialAttributes
+        .~ ("autofocus" =: ""
+          <> "placeholder" =: "Type something here...")
+
+      cancelBtn <- elClass "span" "" $
+        btnWidget "ml-2 px-1 bg-gray-600 rounded-lg" "Cancel"
+      elClass "span" "" $
+        btnWidget "ml-2 px-1 bg-gray-600 rounded-lg" "Save"
+      return cancelBtn
+
+  return ()
+
+
+handleChangeRoomInfo :: CodewordsM t m => m ()
+handleChangeRoomInfo = do
+  btn <- elClass "span" "" $
+    btnWidget "ml-2 px-1 bg-gray-600 rounded-lg" "Change"
+
+  openRoomInfoDialog (True <$ btn)
+  return ()
+
+
 displayRoom :: CodewordsM t m => Int -> Dynamic t Room -> User
   -> RoomStateView -> m (Event t ClientMsg)
 displayRoom n r u v = do
@@ -628,7 +677,7 @@ displayRoom n r u v = do
             elClass "div" "flex" $ do
               elDynClass "div" "p-1 flex-grow bg-gray-700 rounded-t" $ do
                 dynText $ fmap (\room -> "Room: " <> _roomName room) r
-                elClass "button" "ml-2 px-1 bg-gray-600 rounded-lg" $ text "Change"
+                displayIfAdmin adminStatus handleChangeRoomInfo (return ())
               elClass "div" "lg:px-10 2xl:px-3 bg-gray-600 rounded-full" $ text "?"
 
             displayRoomUsers rAdminID (fmap _roomPlayers r)
@@ -774,24 +823,25 @@ inputTextBoxBtnWidget btnText style = mdo
   inputTextBox <- inputElement $ def
     & inputElementConfig_elementConfig
     . elementConfig_initialAttributes
-    .~ ("autofocus" =: "" <> "style" =: style )
+    .~ ("autofocus" =: "" <> "style" =: style
+      <> "placeholder" =: "Type something here...")
     & inputElementConfig_setValue .~ ("" <$ send)
 
   (e, _) <- elClass' "button" "bg-gray-100" $ text btnText
 
-  let clicked = R.traceEvent ("-----------input Click Event") $ domEvent Click e
-      enter = R.traceEvent ("-----------input Enter Event") $ keypress Enter (_inputElement_element
+  let clicked = domEvent Click e
+      enter = keypress Enter (_inputElement_element
         inputTextBox)
       send = leftmost [clicked, enter]
       elVal = _inputElement_value inputTextBox
 
   e' <- dyn $ ffor (notEmpty <$> elVal) $ \case
-    True -> return never
-    False -> return $ R.traceEvent ("-----------inputTextBoxBtnWidget Triggered") $ tag (current elVal) send
+    False -> return never
+    True -> return $ tag (current elVal) send
   switchHold never e'
   where notEmpty t
-          | (T.strip t) == "" = True
-          | otherwise = False
+          | (T.strip t) == "" = False
+          | otherwise = True
 
 signInWidget :: CodewordsM t m => m (Event t ClientMsg)
 signInWidget = do

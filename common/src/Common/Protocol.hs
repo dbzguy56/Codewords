@@ -12,6 +12,7 @@ import Data.Text (Text)
 data ClientMsg
   = CreateName Text
   | CreateRoom Text (Maybe Password)
+  | ChangeRoomName Int Text
   | ChangeGameState Int Codeword
   | EndTurn Int
   | JoinRoom Int

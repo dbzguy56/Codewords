@@ -14,6 +14,7 @@ data ClientMsg
   | CreateRoom Text (Maybe Password)
   | ChangeRoomName Int Text
   | ChangeGameState Int Codeword
+  | EndGame Int
   | EndTurn Int
   | JoinRoom Int
   | LeaveRoom Int
@@ -25,6 +26,7 @@ data ClientMsg
 data ServerMsg
   = GameStarted Int
   | GameStateChanged Int
+  | GameEnded Int
   | NameCreated User
   | RoomCreated Int Room
   | RoomChanged Int Room

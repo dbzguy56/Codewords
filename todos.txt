@@ -1,0 +1,5 @@
+- Update room when player disconnects
+  - when player leaves room, display msg user has left
+  - if not enough players back to lobby
+
+- Default Room Name

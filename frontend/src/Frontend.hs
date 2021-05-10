@@ -75,13 +75,6 @@ data InvalidHintInput
 codeWordsSocket :: CodewordsM t m
   => Event t ClientMsg -> m (Event t ServerMsg)
 codeWordsSocket send = do
-  {-
-    pure :: a -> f a
-      Lift a value.
-
-    return :: a -> m a
-      Inject a value into the monadic type.
-  -}
   --rawWebsocket <- jsonWebSocket "wss://codewords.app/websocket" $ def
   rawWebsocket <- jsonWebSocket "ws://localhost:8000/websocket" $ def
     & webSocketConfig_send .~ (fmap pure send)
@@ -125,70 +118,39 @@ showMsgs :: (MonadHold t m, MonadFix m
   , DomBuilder t m, PostBuild t m)
   => Event t T.Text -> m ()
 showMsgs msg = do
-  {-
-  foldDyn :: hoogle => (a -> b -> b) -> b -> Event t a
-    -> m (Dynamic t b)
-    Create a Dynamic using the initial value and change
-    it each time the Event occurs using a folding function
-    on the previous value and the value of the Event.
-  -}
+
   msgs <- foldDyn (:) [] msg
   simpleList msgs $ el "div" . dynText
   return ()
 
-roomChatWidget :: CodewordsM t m => User -> Dynamic t Room
-  -> m (Event t RoomChatMessage)
-roomChatWidget u r = do
-  {-
-  data Dynamic t :: * -> *
-    A container for a value that can change over time and
-    allows notifications on changes. Basically a combination
-    of a Behavior and an Event, with a rule that the
-    Behavior will change if and only if the Event fires.
-
-  data Behavior t :: * -> *
-    A container for a value that can change over time.
-    Behaviors can be sampled at will, but it is not possible
-    to be notified when they change.
-
-  data Event t :: * -> *
-    A stream of occurrences. During any given frame, an
-    Event is either occurring or not occurring; if it is
-    occurring, it will contain a value of the given type
-    (its "occurrence type")
-
-  simpleList :: hoogle => Dynamic t [v]
-    -> (Dynamic t v -> m a) -> m (Dynamic t [a])
-    Create a dynamically-changing set of widgets from a
-    Dynamic list.
-
-  dynText :: hoogle => Dynamic t Text -> m ()
-
-  elDynClass' :: hoogle => Text -> Dynamic t Text -> m a
-   -> m (Element EventResult (DomBuilderSpace m) t, a)
-   Create a DOM element with a Dynamic class and return the element
-  -}
+roomChatWidget :: CodewordsM t m => Int -> User -> Dynamic t (Maybe GameState)
+  -> Dynamic t [RoomChatMessage] -> m (Event t ClientMsg)
+roomChatWidget n u dmGS dRC = do
   elClass "div" "bg-gray-300 flex flex-col-reverse h-1/3 lg:h-full overflow-auto" $
-    elClass "div" "flex flex-col break-all" $
-      simpleList (fmap (reverse._roomChat) r) (\rChat -> do
+    elClass "div" "flex flex-col-reverse break-all" $
+      simpleList dRC (\rChat -> do
         el "div" $ do
           let uS = fmap userSpeaking rChat
-          elClass "span" "text-red-600" $ dynText $ fmap _name uS
-          dynText ": "
+              tColor = zipDynWith (maybe "text-purple-600") (getTColor <$> uS) dmGS
+
+          elDynClass "span" tColor $ dynText $ fmap _name uS
+          text ": "
           dynText $ fmap chatMessage rChat
         )
 
-  e <- maybeDyn (_roomGameState <$> r)
-  e' <- dyn $ ffor e $ \case
+  dGS <- maybeDyn dmGS
+  msgStream <- dyn $ ffor dGS $ \case
     Just gs -> do
       e2 <- dyn $ ffor ((flip getRoleStatus $ _userID u) <$> gs) $ \case
         SpeakerFor _ -> do
-          let w = _winner <$> gs
+          w <- holdUniqDyn $ _winner <$> gs
           dyn (speakerInput <$> w) >>= switchHold never
         _ -> showInput
       switchHold never e2
     Nothing -> showInput
-  switchHold never e'
+
+  e' <- switchHold never msgStream
+  return $ fmap (SendRoomChatMsg n) e'
 
   where showInput = elClass "div" "flex flex-row" $ do
           eventText <- inputTextBoxBtnWidget
@@ -197,6 +159,10 @@ roomChatWidget u r = do
 
         speakerInput (Just _) = showInput
         speakerInput _ = return never
+
+        getTColor uS x = teamColor $
+          maybe Blue snd $ getUserRoleTeam (_userID uS) x
+
 
 data RoleStatus
   = NotAnyRole
@@ -227,33 +193,26 @@ cardColor (TeamOwned Red) = "bg-red-"
 cardColor (TeamOwned Blue) = "bg-blue-"
 
 displayRoleBar :: CodewordsM t m => User
-  -> Dynamic t (Maybe GameState) -> m ()
-displayRoleBar u mGS = do
+  -> Dynamic t GameState -> m ()
+displayRoleBar u dGS = do
   elClass "div" "flex justify-between" $ do
-    mGS' <- maybeDyn mGS
-    dyn_ $ ffor mGS' $ \case
-      Just gs -> do
+    elClass "div" "" $ do
+      text "Current Turn: "
+      elDynClass "span" (teamColor <$> (_currentTurn <$> dGS)) $
+        dynText $ (tShow <$> (_currentTurn <$> dGS))
+
+    mURoleTeam <- maybeDyn $ (getUserRoleTeam (_userID u)) <$> dGS
+    dyn_ $ ffor mURoleTeam $ \case
+      Just dRT -> do
         elClass "div" "" $ do
-          text "Current Turn: "
-          elDynClass "span" (teamColor <$> (_currentTurn <$> gs)) $
-            dynText $ (tShow <$> (_currentTurn <$> gs))
-
-        mURoleTeam <- maybeDyn $ (getUserRoleTeam (_userID u)) <$> gs
-        dyn $ ffor mURoleTeam $ \case
-          Just dRT -> do
-            elClass "div" "" $ do
-              text "Your Role: "
-              elDynClass "span" (teamColor.snd <$> dRT) $
-                dynText $ tShow.snd <$> dRT
-              el "span" $ dynText $ T.append (T.pack "'s ") <$> fst <$> dRT
-
-          Nothing -> do
-            el "span" $ text "Couldnt find player"
-            return ()
+          text "Your Role: "
+          elDynClass "span" (teamColor.snd <$> dRT) $
+            dynText $ tShow.snd <$> dRT
+          el "span" $ dynText $ T.append (T.pack "'s ") <$> fst <$> dRT
 
       Nothing -> do
-        el "span" $ text "Gamestate does not exist:("
-        return never
+        el "span" $ text "Couldnt find player"
+
 
 getCurrentGuesserName :: GameState -> NonEmpty User -> Maybe T.Text
 getCurrentGuesserName gs us = getName (NE.toList us) $ getUID (_currentTurn gs)
@@ -309,122 +268,67 @@ codewordUI uID gs c = do
             Nothing -> "p-4 flex justify-center rounded-lg items-center "
               <> (styleCard (getRoleStatus gs' uID) c' gs')
 
-displayCodewords :: CodewordsM t m => User
- -> Dynamic t GameState -> m (Event t Codeword)
-displayCodewords u gs = gameBoardUI (_userID u) gs
-
-displayGameBoard :: CodewordsM t m => User
-  -> Dynamic t (Maybe GameState) -> m (Event t Codeword)
-displayGameBoard u mGS = do
-  {-
-  forM :: hoogle => t a -> (a -> m b) -> m (t b)
-    forM is mapM with its arguments flipped.
-    For a version that ignores the results
-    see forM_.
-    mapM: Map each element of a structure to a
-    monadic action, evaluate these actions
-    from left to right, and collect the
-    results. For a version that ignores
-    the results see mapM_.
-
-  pack :: String -> Text
-    O(n) Convert a String into a Text.
-    Subject to fusion. Performs
-    replacement on invalid scalar values.
-
-  leftmost :: Reflex t => [Event t a] -> Event t a
-    Create a new Event that occurs if at
-    least one of the Events in the list
-    occurs. If multiple occur at the same
-    time the value is the value of the
-    leftmost event.
-
-  domEvent :: EventName eventName -> target
-    -> Event t (DomEventType target eventName)
-  -}
-  mGS' <- maybeDyn mGS
-  codewordE <- dyn $ ffor mGS' $
-    \case
-      Just gs -> do
-        displayCodewords u gs
-      Nothing -> do
-        el "div" $ text "Game could not start since \
-          \ gamestate does not exist."
-        return never
-  switchHold never codewordE
-
-displayBottomBar :: CodewordsM t m => UserID -> Int
-  -> Dynamic t (Maybe GameState) -> m (Event t ClientMsg)
-displayBottomBar uID roomID mGS = do
+displayBottomBar :: CodewordsM t m => UserID -> Dynamic t Bool
+  -> Int -> Dynamic t GameState -> m (Event t ClientMsg)
+displayBottomBar uID adminStatus roomID dGS = do
   elClass "div" "flex" $ do
     backBtn <- elClass "span" "" $
       btnWidget "bg-gray-600" "Leave"
 
-    mGS' <- maybeDyn mGS
-    endBtn <- dyn $ ffor mGS' $ \case
-      Just gs -> do
-        elClass "span" "flex flex-col text-base" $ do
-          elClass "span" "text-center" $ text "CARDS LEFT"
-          elClass "span" "" $ do
-            elClass "span" "text-blue-600" $ text "BLUE: "
-            elClass "span" "" $ dynText $ tShow._blueCards._cardsLeft <$> gs
+    dGS' <- holdUniqDyn dGS
+    elClass "span" "flex flex-col text-base" $ do
+      elClass "span" "text-center" $ text "CARDS LEFT"
+      elClass "span" "" $ do
+        elClass "span" "text-blue-600" $ text "BLUE: "
+        elClass "span" "" $ dynText $ tShow._blueCards._cardsLeft <$> dGS'
 
-            elClass "span" "text-red-600" $ text "RED: "
-            elClass "span" "" $ dynText $ tShow._redCards._cardsLeft <$> gs
+        elClass "span" "text-red-600" $ text "RED: "
+        elClass "span" "" $ dynText $ tShow._redCards._cardsLeft <$> dGS'
 
-        ifGuessing (isCurrentGuesser <$>
-          ((flip getRoleStatus uID) <$> gs) <*> (_currentTurn <$> gs))
-          roomID (_turnPhase <$> gs)
+    endTurnBtn <- ifGuessing (isCurrentGuesser <$>
+      ((flip getRoleStatus uID) <$> dGS') <*> (_currentTurn <$> dGS'))
+      roomID (_turnPhase <$> dGS')
 
-      Nothing -> return never
+    let endBtnStyle b = bool "opacity-0 pointer-events-none"
+          "opacity-100 pointer-events-auto" b
 
-    endBtn' <- switchHold never endBtn
-    return $ leftmost [endBtn', LeaveRoom roomID <$ backBtn]
+    endGameBtn <- elDynClass "span" (endBtnStyle <$> adminStatus) $
+      btnWidget "bg-gray-600" "END GAME"
+
+    return $ leftmost [endTurnBtn, EndGame roomID <$ endGameBtn
+      , LeaveRoom roomID <$ backBtn]
 
 ifGuessing :: CodewordsM t m => Dynamic t Bool -> Int -> Dynamic t TurnPhase
   -> m (Event t ClientMsg)
-ifGuessing dCurrentG roomID dTP = (dyn $ gPattern <$> dCurrentG <*> dTP) >>=
-  switchHold never
-
-  where gPattern currentG (Guessing (Clue _ _ g)) = do
-          elClass "span" "" $ text $ "GUESSES LEFT: "
-            <> (tShow g)
-          endTurnBtnFn currentG
-        gPattern _ _ = return never
-
-        endTurnBtnFn True = do
+ifGuessing dCurrentG roomID dTP = do
+  dTP' <- holdUniqDyn dTP
+  e' <- dyn $ ffor dTP' $ \case
+    (Guessing (Clue _ _ g)) -> do
+      elClass "span" "" $ text $ "GUESSES LEFT: "
+        <> (tShow g)
+      e <- dyn $ ffor dCurrentG $ \case
+        True -> do
           btn <- elClass "span" "" $ btnWidget "bg-gray-600" "END TURN"
           return $ EndTurn roomID <$ btn
-        endTurnBtnFn False = return never
+        False -> return never
+      switchHold never e
+    _ -> return never
+  switchHold never e'
 
-gameBoardWidget :: CodewordsM t m => Int -> Dynamic t Room
-  -> User -> m (Event t ClientMsg)
-gameBoardWidget n r u = do
-    {-
-  dyn_ :: hoogle => Dynamic t (m a) -> m ()
-    Like dyn but discards result.
-    dyn: Given a Dynamic of widget-creating
-    actions, create a widget that is recreated
-    whenever the Dynamic updates. The returned
-    Event occurs whenever the child widget is
-    updated, which is at post-build in
-    addition to the times at which the input
-    Dynamic is updated, and its value is the
-    result of running the widget. Note: Often,
-    the type a is an Event, in which case the
-    return value is an Event-of-Events that
-    would typically be flattened
-    (via switchHold).
+gameBoardWidget :: CodewordsM t m => Int -> Dynamic t Bool
+  -> Dynamic t Room -> User -> m (Event t ClientMsg)
+gameBoardWidget n adminStatus r u = do
+  dmGS <- maybeDyn $ _roomGameState <$> r
+  e <- dyn $ ffor dmGS $ \case
+    Just gs -> do
+      displayRoleBar u gs
+      c <- gameBoardUI (_userID u) gs
+      bottomE <- displayBottomBar (_userID u) adminStatus n gs
 
-  (<$>) :: Functor f => (a -> b) -> f a -> f b
-      An infix synonym for fmap.
-  -}
-  displayRoleBar u (_roomGameState <$> r)
-  codeword <- displayGameBoard u (_roomGameState <$> r)
-  bottomE <- displayBottomBar (_userID u) n (_roomGameState <$> r)
-  return $ leftmost [ChangeGameState n <$> codeword,
-    bottomE]
-
+      return $ leftmost [ChangeGameState n <$> c,
+        bottomE]
+    Nothing -> return never
+  switchHold never e
 
 btnWidget :: CodewordsM t m => T.Text -> T.Text -> m (Event t ())
 btnWidget style t = do
@@ -445,17 +349,16 @@ displaySideBar n u r = do
   rGS <- maybeDyn (_roomGameState <$> r)
   e <- dyn $ ffor rGS $ \case
     Just gs -> do
-      let dCSpeaker = isCurrentSpeaker <$> ((flip getRoleStatus $ _userID u) <$> gs)
-            <*> (_currentTurn <$> gs)
+      let dCSpeaker = isCurrentSpeaker <$> ((flip getRoleStatus $ _userID u)
+            <$> gs) <*> (_currentTurn <$> gs)
           dSpeakerCluePicking = (&&) <$> dCSpeaker
             <*> (isCluePicking <$> (_turnPhase <$> gs))
-
-      e' <- dyn $ ffor dSpeakerCluePicking $ \case
-        True -> (dyn $ displaySpeakerView n <$> (_gameBoard <$> gs))
-                  >>= switchHold never
-        False -> displayRoomChat n u r
+      dSCP <- holdUniqDyn dSpeakerCluePicking
+      e' <- dyn $ ffor dSCP $ \case
+        True -> displaySpeakerView n (_gameBoard <$> gs)
+        False -> roomChatWidget n u (_roomGameState <$> r) (fmap (_roomChat) r)
       switchHold never e'
-    Nothing -> displayRoomChat n u r
+    Nothing -> roomChatWidget n u (_roomGameState <$> r) (fmap (_roomChat) r)
   switchHold never e
   where isCluePicking CluePicking = True
         isCluePicking _ = False
@@ -488,8 +391,8 @@ hintErrMsg ContainsCodeword = "Hint cannot contain a codeword!"
 
 
 displaySpeakerView :: CodewordsM t m => Int
-  -> Board -> m (Event t ClientMsg)
-displaySpeakerView n gb = do
+  -> Dynamic t Board -> m (Event t ClientMsg)
+displaySpeakerView n dGB = do
   cMsg <- elClass "div" "flex flex-col justify-between bg-gray-600 \
     \ h-full text-center" $ mdo
 
@@ -500,7 +403,7 @@ displaySpeakerView n gb = do
       h <- inputElement $ def
 
       let elVal = _inputElement_value h
-          eitherClue = (parseHintInput gb) <$> elVal <*> guesses
+          eitherClue = parseHintInput <$> dGB <*> elVal <*> guesses
       eitherClue' <- eitherDyn eitherClue
       dyn_ $ ffor eitherClue' $ \case
         Left a -> do
@@ -550,12 +453,6 @@ displaySpeakerView n gb = do
         decFn x = subtract 1 x
 
 
-displayRoomChat :: CodewordsM t m => Int -> User
-  -> Dynamic t Room -> m (Event t ClientMsg)
-displayRoomChat n u r = do
-  msgStream <- roomChatWidget u r
-  return $ fmap (SendRoomChatMsg n) msgStream
-
 displayTopMessageBar :: CodewordsM t m => Dynamic t Room
   -> m ()
 displayTopMessageBar r = do
@@ -572,7 +469,7 @@ displayTopMessageBar r = do
             text " team wins!"
           Nothing -> do
             let rPs = _roomPlayers <$> r
-            dyn_ $ turnPhaseMsg <$> gs <*> (_turnPhase <$> gs) <*> rPs
+            turnPhaseMsg gs rPs
 
       Nothing -> do
         let rPs = (NE.toList._roomPlayers) <$> r
@@ -589,39 +486,44 @@ displayTopMessageBar r = do
     return ()
   return ()
 
-turnPhaseMsg :: CodewordsM t m =>
-  GameState -> TurnPhase -> NonEmpty User -> m ()
-turnPhaseMsg gs CluePicking ps = do
-  case (getCurrentSpeakerName gs ps) of
-    Just p -> do
-      elClass "span" (teamColor $ _currentTurn gs)
-        $ text p
-      text  " is thinking of a hint."
-      return ()
-    Nothing ->
-      text "Cannot find Speaker"
-turnPhaseMsg gs (Guessing (Clue h rWords _)) ps =
-  elClass "span" "flex justify-between w-full px-2" $ do
-    el "div" $ do
-      elClass "span" "color-red-600" $ text $ "HINT: " <> h
-
-    el "div" $ do
-      text "Guesser: "
-      case (getCurrentGuesserName gs ps) of
-        Just p ->
-          elClass "span" (teamColor $ _currentTurn gs) $ text p
+turnPhaseMsg :: CodewordsM t m => Dynamic t GameState
+  -> Dynamic t (NonEmpty User) -> m ()
+turnPhaseMsg dGS dPs = do
+  dyn_ $ ffor (_turnPhase <$> dGS) $ \case
+    CluePicking -> do
+      let dCSpeaker = getCurrentSpeakerName <$> dGS <*> dPs
+      dyn_ $ ffor dCSpeaker $ \case
+        Just p -> do
+          elDynClass "span" (teamColor <$> (_currentTurn <$> dGS))
+            $ text p
+          text  " is thinking of a hint."
+          return ()
         Nothing ->
-          el "div" $ text "Cannot find Guesser"
+          text "Cannot find Speaker"
 
-    el "div" $ text $ "RELATED WORDS: " <> tShow rWords
+    (Guessing (Clue h rWords _)) -> do
+      elClass "span" "flex justify-between w-full px-2" $ do
+        el "div" $ do
+          elClass "span" "color-red-600" $ text $ "HINT: " <> h
+
+        el "div" $ do
+          text "Guesser: "
+          let dCGuesser = getCurrentGuesserName <$> dGS <*> dPs
+          dyn_ $ ffor dCGuesser $ \case
+            Just p ->
+              elDynClass "span" (teamColor <$> (_currentTurn <$> dGS)) $ text p
+            Nothing ->
+              el "div" $ text "Cannot find Guesser"
+
+        el "div" $ text $ "RELATED WORDS: " <> tShow rWords
 
 teamColor :: Team -> T.Text
 teamColor Blue = "text-blue-600"
 teamColor Red = "text-red-600"
 
-openRoomInfoDialog :: CodewordsM t m =>
-  Event t Bool -> m ()
-openRoomInfoDialog eToggle = mdo
+openRoomInfoDialog :: CodewordsM t m => Event t Bool
+  -> T.Text -> m (Event t T.Text)
+openRoomInfoDialog eToggle initialRoomName = mdo
   dOpen <- holdDyn False $ leftmost [eToggle, False <$ eClose]
   let mkStyles b = T.intercalate " "
         ["absolute flex justify-center \
@@ -631,58 +533,67 @@ openRoomInfoDialog eToggle = mdo
 
   eClose <- elDynClass "div" (mkStyles <$> dOpen) $ do
     elClass "div" "bg-red-500 w-1/2 h-1/2" $ do
-      inputElement $ def
+      iE <- inputElement $ def
         & inputElementConfig_elementConfig
-        . elementConfig_initialAttributes
-        .~ ("autofocus" =: ""
-          <> "placeholder" =: "Type something here...")
+          . elementConfig_initialAttributes
+          .~ ("autofocus" =: ""
+            <> "placeholder" =: "Type something here...")
+        & inputElementConfig_initialValue .~ initialRoomName
 
-      cancelBtn <- elClass "span" "" $
-        btnWidget "ml-2 px-1 bg-gray-600 rounded-lg" "Cancel"
-      elClass "span" "" $
-        btnWidget "ml-2 px-1 bg-gray-600 rounded-lg" "Save"
-      return cancelBtn
+      let btnStyles = "ml-2 px-1 bg-gray-600 rounded-lg"
+      (cancelBtn, _) <- elClass' "span" "" $
+        btnWidget btnStyles "Cancel"
+      (saveBtn, _) <- elClass' "span" "" $
+        btnWidget btnStyles "Save"
 
-  return ()
+      let saveE = tag (current $ _inputElement_value iE) $ domEvent Click saveBtn
+          cancelE = domEvent Click cancelBtn
+
+      return $ leftmost [saveE, initialRoomName <$ cancelE]
+
+  return $ ffilter (\x -> ((/=) initialRoomName x) && ((/=) "" x)) eClose
 
 
-handleChangeRoomInfo :: CodewordsM t m => m ()
-handleChangeRoomInfo = do
+handleChangeRoomInfo :: CodewordsM t m => Int -> Dynamic t Room
+  -> m (Event t ClientMsg)
+handleChangeRoomInfo n dR = do
   btn <- elClass "span" "" $
     btnWidget "ml-2 px-1 bg-gray-600 rounded-lg" "Change"
 
-  openRoomInfoDialog (True <$ btn)
-  return ()
+  eT <- dyn $ (openRoomInfoDialog (True <$ btn)) <$> (_roomName <$> dR)
+  eT' <- switchHold never eT
+
+  return $ ChangeRoomName n <$> eT'
 
 
 displayRoom :: CodewordsM t m => Int -> Dynamic t Room -> User
   -> RoomStateView -> m (Event t ClientMsg)
 displayRoom n r u v = do
-  {-
-  dynText :: hoogle => Dynamic t Text -> m ()
-  -}
+  r' <- holdUniqDyn r
   elClass "div" "flex flex-col h-screen select-none" $ do
-    let rAdminID = fmap _roomAdminID r
+    let rAdminID = fmap _roomAdminID r'
     let adminStatus = isUserAdmin rAdminID (return u)
     elClass "div" "flex justify-center bg-gray-700 xl:h-16 \
       \ 2xl:h-8 rounded lg:text-5xl" $
       text "GET UR BEEG YOSHI HERE"
 
-    displayTopMessageBar r
+    displayTopMessageBar r'
 
     elClass "div" "flex flex-col text-5xl md:flex-row h-full overflow-hidden lg:text-3xl" $ do
       btn <- elClass "div" "flex flex-col flex-grow bg-gray-500 rounded h-full" $ do
         case v of
           LobbyView -> do
-            elClass "div" "flex" $ do
-              elDynClass "div" "p-1 flex-grow bg-gray-700 rounded-t" $ do
-                dynText $ fmap (\room -> "Room: " <> _roomName room) r
-                displayIfAdmin adminStatus handleChangeRoomInfo (return ())
+            eRN' <- elClass "div" "flex" $ do
+              eRN <- elDynClass "div" "p-1 flex-grow bg-gray-700 rounded-t" $ do
+                dynText $ fmap (\room -> "Room: " <> _roomName room) r'
+                displayIfAdmin adminStatus (handleChangeRoomInfo n r') (return never)
+
               elClass "div" "lg:px-10 2xl:px-3 bg-gray-600 rounded-full" $ text "?"
+              return eRN
 
-            displayRoomUsers rAdminID (fmap _roomPlayers r)
+            displayRoomUsers rAdminID (fmap _roomPlayers r')
 
-            elClass "div" "flex flex-row justify-between h-1/6" $ do
+            eBtn <- elClass "div" "flex flex-row justify-between h-1/6" $ do
               let btnStyles = "m-2 p-1 bg-gray-600 rounded-lg"
               backBtn <- btnWidget btnStyles "Leave"
 
@@ -693,42 +604,24 @@ displayRoom n r u v = do
               return $ leftmost [ LeaveRoom n <$ backBtn
                 , StartGame n <$ startBtn']
 
+            eRoomName <- switchHold never eRN'
+            return $ leftmost [eBtn, eRoomName]
+
           GameView -> do
-            clientMsg <- gameBoardWidget n r u
+            clientMsg <- gameBoardWidget n adminStatus r' u
             return clientMsg
 
       cMsg <- elClass "div" "flex flex-col h-full lg:w-1/4" $ do
-        displaySideBar n u r
+        displaySideBar n u r'
 
       return $ leftmost [cMsg, btn]
 
 isUserAdmin :: Reflex t => Dynamic t UserID
   -> Dynamic t User -> Dynamic t Bool
-  {-
-  (<*>) :: f (a -> b) -> f a -> f b
-    Sequential application. A few functors support an implementation
-    of <*> that is more efficient than the default one.
-    Using ApplicativeDo: 'fs <*> as' can be understood as
-    the do expression:
-      do f <- fs
-         a <- as
-         pure (f a)
-  -}
 isUserAdmin adminID u = (==) <$> (fmap _userID u) <*> adminID
 
 displayIfAdmin :: CodewordsM t m => Dynamic t Bool -> m b -> m b
   -> m (Event t b)
-  {-
-  dyn :: hoogle => Dynamic t (m a) -> m (Event t a)
-    Given a Dynamic of widget-creating actions, create a widget
-    that is recreated whenever the Dynamic updates. The returned
-    Event occurs whenever the child widget is updated, which is
-    at post-build in addition to the times at which the input
-    Dynamic is updated, and its value is the result of running
-    the widget. Note: Often, the type a is an Event, in which
-    case the return value is an Event-of-Events that would
-    typically be flattened (via switchHold).
-  -}
 displayIfAdmin adminStatus adminAction defAction
   = dyn $ fmap doFn adminStatus
   where doFn False = defAction
@@ -737,14 +630,6 @@ displayIfAdmin adminStatus adminAction defAction
 
 displayRoomCard :: CodewordsM t m => Dynamic t (Int, Room)
   -> m (Event t Int)
-  {-
-  tag :: Reflex t => Behavior t b -> Event t a -> Event t b
-    Replace each occurrence value of the Event with the value
-    of the Behavior at the time of that occurrence.
-
-  current :: Reflex t => Dynamic t a -> Behavior t a
-    Extract the Behavior of a Dynamic.
-  -}
 displayRoomCard r = do
   (e, _) <- el' "div" $ dynText $ fmap (_roomName.snd) r
   return $ tag (current $ fmap fst r) $ domEvent Click e
@@ -767,18 +652,6 @@ displayRoomUsers adminID users = elClass "div" "px-4 h-full" $ do
 
 roomsWidget :: CodewordsM t m => Event t (IntMap Room)
   -> Event t (Int, Room) -> Event t Int -> m (Dynamic t (IntMap Room))
-  {-
-  mempty :: a
-    Identity of mappend
-
-  mappend :: a -> a -> a
-    An associative operation
-
-  (<>) :: a -> a -> a
-    An associative operation.
-    >>> [1,2,3] <> [4,5,6]
-      [1,2,3,4,5,6]
-  -}
 roomsWidget rList e deleteEvent =
   foldDyn ($) mempty $ leftmost [ fmap mappend rList
   , fmap (\(i, r) -> insert i r) e
@@ -787,16 +660,6 @@ roomsWidget rList e deleteEvent =
 
 roomListWidget :: CodewordsM t m => Dynamic t (IntMap Room)
   -> m (Event t Int)
-  {-
-  switchDyn :: forall t a. Reflex t =>
-    Dynamic t (Event t a) -> Event t a
-    Switches to the new Event whenever it receives one. Only the old event
-    is considered the moment a new one is switched in; the output event
-    will fire at that moment if only if the old event does.
-
-  toList :: IntMap a -> [(Key, a)]
-    Convert the map to a list of key/value pairs. Subject to list fusion.
-  -}
 roomListWidget rList = do
   eList <- el "div" $ simpleList (fmap M.toList rList) displayRoomCard
   return $ switchDyn $ leftmost <$> eList
@@ -804,21 +667,6 @@ roomListWidget rList = do
 
 inputTextBoxBtnWidget :: CodewordsM t m
   => T.Text -> T.Text -> m (Event t T.Text)
-  {-
-  (.~) :: ASetter s t a b -> b -> s -> t
-    Replace the target of a Lens or all of the targets of a Setter
-    or Traversal with a constant value.
-
-  (<$) :: a -> f b -> f a
-    Replace all locations in the input with the same value. The
-    default definition is fmap . const, but this may be overridden
-    with a more efficient version.
-
-    Using ApplicativeDo: 'a <$ bs' can be understood as the do
-    expression:
-      do bs
-         pure a
-  -}
 inputTextBoxBtnWidget btnText style = mdo
   inputTextBox <- inputElement $ def
     & inputElementConfig_elementConfig
@@ -835,7 +683,8 @@ inputTextBoxBtnWidget btnText style = mdo
       send = leftmost [clicked, enter]
       elVal = _inputElement_value inputTextBox
 
-  e' <- dyn $ ffor (notEmpty <$> elVal) $ \case
+  e' <- dyn $ ffor ((&&) <$> (notEmpty <$> elVal)
+    <*> ((/=) "SYSTEM" <$> elVal)) $ \case
     False -> return never
     True -> return $ tag (current elVal) send
   switchHold never e'
@@ -863,6 +712,7 @@ changeView (GameStarted rID) (LoggedIn u _) = LoggedIn u $ RoomView rID GameView
 changeView (LeftRoom u) _ = LoggedIn u HomeView
 changeView (NameCreated u) _ = LoggedIn u HomeView
 changeView (RoomCreated rID _) (LoggedIn u _) = LoggedIn u $ RoomView rID LobbyView
+changeView (GameEnded rID) (LoggedIn u _) = LoggedIn u $ RoomView rID LobbyView
 -- TODO: Allow user to join mid game possibly?
 changeView (RoomJoined rID) (LoggedIn u _) = LoggedIn u $ RoomView rID LobbyView
 changeView _ v = v
@@ -872,39 +722,6 @@ router :: CodewordsM t m => Dynamic t (IntMap Room) -> View
 router _ SignIn = signInWidget
 router r (LoggedIn u HomeView) = homeViewWidget r u
 router roomList (LoggedIn u (RoomView n v)) = do
-  {-
-  maybeDyn :: hoogle => Dynamic t (Maybe a)
-    -> m (Dynamic t (Maybe (Dynamic t a)))
-    Factor a Dynamic t (Maybe a) into a Dynamic t (Maybe (Dynamic t a)),
-    such that the outer Dynamic is updated only when the Maybe's
-    constructor changes from Nothing to Just or vice-versa. Whenever
-    the constructor becomes Just, an inner Dynamic will be provided,
-    whose value will track the a inside the Just; when the constructor
-    becomes Nothing, the existing inner Dynamic will become constant,
-    and will not change when the outer constructor changes back to
-    Nothing.
-
-  (>>) :: forall a b. m a -> m b -> m b
-    Sequentially compose two actions, discarding any value produced
-    by the first, like sequencing operators (such as the semicolon)
-    in imperative languages.
-
-  never :: (Monad f, MonadFree f m) => m a
-    A computation that never terminates
-
-  ffor :: Functor f => f a -> (a -> b) -> f b
-    Flipped version of fmap.
-
-  switchHold :: hoogle => Event t a
-    -> Event t (Event t a) -> m (Event t a)
-    Switches to the new event whenever it receives one. Only the
-    old event is considered the moment a new one is switched in;
-    the output event will fire at that moment only if the old
-    event does.
-
-  lookup :: Key -> IntMap a -> Maybe a
-    Lookup the value at a key in the map. See also lookup.
-  -}
   let currentRoom = M.lookup n <$> roomList
   currentRoom' <- maybeDyn currentRoom
   clientMsg <- dyn $ ffor currentRoom' $ \case
@@ -943,43 +760,7 @@ frontend = Frontend
 
       prerender_ blank $ liftJSM $ void $ eval ("" :: T.Text)
       prerender_ blank $ mdo
-        {-
-          prerender_ :: (Functor m, Reflex t, Prerender js t m)
-            => m () -> Client m () -> m ()
-            Render the first widget on the server, and the
-            second on the client. The hydration builder will
-            run *both* widgets.
 
-          liftJSM :: MonadJSM m => JSM a -> m a
-            The liftJSM is to JSM what liftIO is to IO. When
-            using GHCJS it is liftIO.
-
-          liftIO :: IO a -> m a
-            Lift a computation from the IO monad.
-
-          eval :: ToJSString script => script
-            -> JSM JSVAL
-            JavaScript to evalute.
-
-          holdUniqDyn :: hoogle => Dynamic t a -> m (Dynamic t a)
-            Create a new Dynamic that only signals changes if the
-            values actually changed.
-
-          fmapMaybe :: Filterable f => (a -> Maybe b) -> f a -> f b
-            Alias for mapMaybe: mapMaybe :: (a -> Maybe b) -> [a] -> [b]
-            The mapMaybe function is a version of map which can
-            throw out elements. In particular, the functional
-            argument returns something of type Maybe b. If this
-            is Nothing, no element is added on to the result list.
-            If it is Just b, then b is included in the result list.
-
-          preview :: MonadReader s m => Getting (First a) s a
-            -> m (Maybe a)
-            Retrieve the first value targeted by a Fold or Traversal
-            (or Just the result from a Getter or Lens). See also
-            firstOf and ^?, which are similar with some subtle
-            differences (explained below).
-        -}
         serverMsg <- codeWordsSocket newClientMsg
 
         dView <- foldDyn changeView SignIn serverMsg

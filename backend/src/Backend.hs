@@ -44,22 +44,12 @@ data ServerState
           , usersConnected :: TVar [UConnection]
           , pureGen :: TVar StdGen
           }
-{-
-  TVar a
-    Shared memory locations that support atomic memory transactions.
-
-  TChan a
-    TChan is an abstract type representing an unbounded FIFO channel.
--}
 
 systemUser :: User
 systemUser = User ("SYSTEM" :: T.Text) (UserID (-1))
 
 handleNewConnection :: Maybe User -> ServerState -> Connection -> IO ()
-{-
-  receiveData :: WebSocketsData a => Connection -> IO a
-    Receive a message, converting it to whatever format is needed.
--}
+
 handleNewConnection mUser state connection = do
   let s = sendTextData connection.encode
   a <- receiveData connection
@@ -73,45 +63,6 @@ handleNewConnection mUser state connection = do
 
 handleWebsocket :: ServerState -> PendingConnection -> IO ()
 handleWebsocket s p = do
-    {-
-      PendingConnection
-        A new client connected to the server. We haven't
-        accepted the connection yet, though.
-
-      sendTextData :: WebSocketsData a => Connection -> a -> IO ()
-        Send a textual message. The message will be
-        encoded as UTF-8. This should be the default choice
-        for human-readable text-based protocols such as
-        JSON.
-
-      dupTChan :: TChan a -> STM (TChan a)
-        Duplicate a TChan: the duplicate channel begins empty,
-        but data written to either channel from then on will
-        be available from both. Hence this creates a kind of
-        broadcast channel, where data written by anyone is
-        seen by everyone else.
-
-      ThreadId
-        A ThreadId is an abstract type representing a handle
-        to a thread. ThreadId is an instance of Eq, Ord and
-        Show, where the Ord instance implements an
-        arbitrary total ordering over ThreadIds. The Show
-        instance lets you convert an arbitrary-valued
-        ThreadId to string form; showing a ThreadId value is
-        occasionally useful when debugging or diagnosing the
-        behaviour of a concurrent program.
-
-
-      forkIO :: IO () -> IO ThreadId
-        Creates a new thread to run the IO computation passed
-        as the first argument, and returns the ThreadId of
-        the newly created thread. The new thread will be a
-        lightweight, unbound thread.
-
-
-      readTVar :: TVar a -> STM a
-        Return the current value stored in a TVar.
-    -}
   fullConnection <- acceptRequest p
   let sendFn = sendTextData fullConnection.encode
   bc <- atomically $ dupTChan (broadcast s)
@@ -125,10 +76,7 @@ handleWebsocket s p = do
 handleClientMsg :: ServerState -> Maybe User -> ClientMsg
   -> (ServerMsg -> IO ()) -> Connection -> IO (Maybe User)
 handleClientMsg state mUser cMsg sendFn connection = do
-  {-
-  writeTVar :: TVar a -> a -> STM ()
-    Write the supplied value into a TVar.
-  -}
+
   let updateFn = tryUpdateRoom (rooms state) (broadcast state)
 
   case cMsg of
@@ -274,11 +222,43 @@ handleClientMsg state mUser cMsg sendFn connection = do
                     newTurn gs pGen
 
                   updateFn roomID $ updateRoomGameState newGS
-                  return()
+                  return ()
                 False -> return ()
             Nothing -> return ()
         Nothing -> return ()
 
+      return mUser
+
+    EndGame roomID -> do
+      mRoom <- roomExist (rooms state) roomID
+      case mRoom of
+        Just _ -> do
+          newR <- updateFn roomID $ changeToLobby
+
+          case newR of
+            Just r' -> do
+              usConnected <- readTVarIO (usersConnected state)
+
+              let rPlayers = NE.toList $ _roomPlayers r'
+              sendUsersServerMsg rPlayers (GameEnded roomID)
+                usConnected
+
+              sendUsersServerMsg rPlayers (RoomChanged roomID r')
+                usConnected
+              return ()
+
+            Nothing -> return ()
+
+        Nothing -> return ()
+      return mUser
+
+    ChangeRoomName roomID newRoomName -> do
+      mRoom <- roomExist (rooms state) roomID
+      case mRoom of
+        Just _ -> do
+          updateFn roomID $ changeRoomName newRoomName
+          return ()
+        Nothing -> return ()
       return mUser
 
 ifGuessingPhase :: Maybe Team -> TurnPhase -> Bool
@@ -324,31 +304,7 @@ sendUsersServerMsg roomUsers sMsg userCs = do
 
 tryUpdateRoom :: TVar (IntMap Room) -> TChan ServerMsg
   -> Int -> (Room -> Room) -> IO (Maybe Room)
-  {-
-    stateTvar :: TVar s -> (s -> (a, s)) -> STM a
-      Like modifyTVar' (mutates content) but the function is a
-      simple state transition that can return a side value which
-      is passed on as the result of the STM.
 
-    STM a
-      A monad supporting atomic memory transactions.
-
-    readTVarIO :: TVar a -> IO a
-      Return the current value stored in a TVar. This is equivalent to
-        readTVarIO = atomically . readTVar
-
-    atomically :: STM a -> IO a
-      Performs a series of STM actions atomically.
-
-    adjust :: (a -> a) -> Key -> IntMap a -> IntMap a
-
-    set :: ASetter s t a b -> b -> s -> t
-
-    lookup :: Key -> IntMap a -> Maybe a
-
-    writeTChan :: TChan a -> a -> STM ()
-      Write a value to a TChan.
-  -}
 tryUpdateRoom rTVar broadcastChan rID fn = do
   r <- roomExist rTVar rID
   case r of
@@ -375,6 +331,7 @@ roomExist rTVar rID = do
   rIntMap <- readTVarIO rTVar
   return $ M.lookup rID rIntMap
 
+
 deleteRoom :: TVar (IntMap Room) -> Int
   -> IO (Maybe Room)
 deleteRoom rTVar rID = atomically $ stateTVar rTVar $ \r ->
@@ -400,19 +357,6 @@ removeUserOrRoom rTVar broadcastChan rID fn = do
 handleTChanComms :: Connection -> TChan ServerMsg
   -> IO ()
 handleTChanComms c t = forever $ do
-  {-
-  class Functor f => Applicative f where
-    A functor with application, providing operations to
-      i) embed pure expressions (pure), and
-      ii) sequence computations and combine their results
-          (<*> and liftA2).
-
-  forever :: Applicative f => f a -> f b
-    Repeat an action indefinitely.
-
-  readTChan :: TChan a -> STM a
-    Read the next value from the TChan.
-  -}
   let sendFn = sendTextData c.encode
   s <- atomically $ readTChan t
   sendFn s
@@ -420,36 +364,13 @@ handleTChanComms c t = forever $ do
 
 appendUserToRoom :: User -> Room
   -> Room
-  {-
-  over :: ASetter s t a b -> (a -> b) -> s -> t
-    Modify the target of a Lens or all the targets of a
-    Setter or Traversal with a function.
-
-  (<|) :: a -> NonEmpty a -> NonEmpty a
-    Prepend an element to the stream.
-
-  -}
 appendUserToRoom u r = addUser r
   where addUser = over roomPlayers (u NE.<|)
 
 removeUserFromRoom :: User -> Room
   -> Room
 removeUserFromRoom u r = do
-  {-
-  (=<<) :: Monad m => (a -> m b) -> m a -> m b
-    Sequentially compose two actions, passing any value
-    produced by the second as an argument to the first.
-      'bs =<< as' can be understood as the do expression
-        do a <- as
-          bs a
 
-  filter :: (a -> Bool) -> NonEmpty a -> [a]
-
-  nonEmpty :: [a] -> Maybe (NonEmpty a)
-
-  fmapMaybe :: Filterable f => (a -> Maybe b)
-    -> f a -> f b
-  -}
   let oldMembers = _roomPlayers r
       newMembers = NE.nonEmpty $ NE.filter
         (\newU -> _userID u /= _userID newU) oldMembers
@@ -464,6 +385,12 @@ updateRoomGameState :: GameState -> Room
   -> Room
 updateRoomGameState gs r@Room{..} = r {_roomGameState = Just gs}
 
+changeToLobby :: Room -> Room
+changeToLobby r@Room{..} = r {_roomGameState = Nothing}
+
+changeRoomName :: T.Text -> Room
+  -> Room
+changeRoomName newName r@Room{..} = r {_roomName = newName}
 
 appendRoomChatMsg :: RoomChatMessage -> Room -> Room
 appendRoomChatMsg rChatMsg r = addMsg r
@@ -475,65 +402,12 @@ nextUserID a = atomically $ stateTVar a $ \c -> (c, c + 1)
 
 addRoom :: Room -> IntMap Room -> (Int, IntMap Room)
 addRoom r m = (newIndex, M.insert newIndex r m)
-  {-
-  maybe :: b -> (a -> b) -> Maybe a -> b
-    The maybe function takes a default value, a function, and a
-    Maybe value. If the Maybe value is Nothing, the function
-    returns the default value. Otherwise, it applies the
-    function to the value inside the Just and returns the result.
 
-  maximumMay :: Ord a => [a] -> Maybe a
-
-  insert :: Key -> a -> IntMap a -> IntMap a
-    O(min(n,W)). Insert a new key/value pair in the map. If the
-    key is already present in the map, the associated value is
-    replaced with the supplied value, i.e. insert is equivalent to
-    insertWith const.
-
-  keys :: IntMap a -> [Key]
-    O(n). Return all keys of the map in ascending order. Subject
-    to list fusion.
-  -}
   where biggestIndex = maybe 0 id $ maximumMay $ keys m
         newIndex = biggestIndex + 1
 
 initServer :: IO ServerState
 initServer = do
-  {-
-  newTVarIO :: a -> IO (TVar a)
-    IO version of newTVar. This is useful for creating top-level
-    TVars using unsafePerformIO, because using atomically inside
-    unsafePerformIO isn't possible.
-
-  mempty :: a
-    Identity of mappend
-    mappend :: a -> a -> a
-      An associative operation
-      (<>) :: a -> a -> a
-        [1,2,3] <> [4,5,6]
-
-  newBroadcastTChanIO :: IO (TChan a)
-    IO version of newBroadcastTChan.
-    newBroadcastTChan :: STM (TChan a)
-    Create a write-only TChan. More precisely, readTChan will
-    retry even after items have been written to the channel.
-    The only way to read a broadcast channel is to duplicate
-    it with dupTChan.
-
-    Consider a server that broadcasts messages to clients:
-      serve :: TChan Message -> Client -> IO loop
-      serve broadcastChan client = do
-        myChan <- dupTChan broadcastChan
-        forever $ do
-            message <- readTChan myChan
-            send client message
-
-    The problem with using newTChan to create the broadcast
-    channel is that if it is only written to and never read,
-    items will pile up in memory. By using newBroadcastTChan
-    to create the broadcast channel, items can be garbage
-    collected after clients have seen them.
-  -}
   c <- newTVarIO (0 :: Int)
   rooms <- newTVarIO mempty
   uConnections <- newTVarIO mempty
@@ -544,14 +418,6 @@ initServer = do
 backend :: Backend BackendRoute FrontendRoute
 backend = Backend
   { _backend_run = \serve -> do
-    {-
-    runWebSocketsSnap :: MonadSnap m => ServerApp -> m ()
-      The following function escapes from the current Snap
-      handler, and continues processing the WebSockets action.
-      The action to be executed takes the Request as a
-      parameter, because snap has already read this from
-      the socket.
-    -}
     s <- initServer
     serve $ \case
       BackendRoute_Websocket :/ () ->

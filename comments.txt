@@ -1,0 +1,384 @@
+// Frontend.hs
+
+prerender_ :: (Functor m, Reflex t, Prerender js t m)
+  => m () -> Client m () -> m ()
+  Render the first widget on the server, and the
+  second on the client. The hydration builder will
+  run *both* widgets.
+
+liftJSM :: MonadJSM m => JSM a -> m a
+  The liftJSM is to JSM what liftIO is to IO. When
+  using GHCJS it is liftIO.
+
+liftIO :: IO a -> m a
+  Lift a computation from the IO monad.
+
+eval :: ToJSString script => script
+  -> JSM JSVAL
+  JavaScript to evalute.
+
+holdUniqDyn :: hoogle => Dynamic t a -> m (Dynamic t a)
+  Create a new Dynamic that only signals changes if the
+  values actually changed.
+
+fmapMaybe :: Filterable f => (a -> Maybe b) -> f a -> f b
+  Alias for mapMaybe: mapMaybe :: (a -> Maybe b) -> [a] -> [b]
+  The mapMaybe function is a version of map which can
+  throw out elements. In particular, the functional
+  argument returns something of type Maybe b. If this
+  is Nothing, no element is added on to the result list.
+  If it is Just b, then b is included in the result list.
+
+preview :: MonadReader s m => Getting (First a) s a
+  -> m (Maybe a)
+  Retrieve the first value targeted by a Fold or Traversal
+  (or Just the result from a Getter or Lens). See also
+  firstOf and ^?, which are similar with some subtle
+  differences (explained below).
+
+maybeDyn :: hoogle => Dynamic t (Maybe a)
+  -> m (Dynamic t (Maybe (Dynamic t a)))
+  Factor a Dynamic t (Maybe a) into a Dynamic t (Maybe (Dynamic t a)),
+  such that the outer Dynamic is updated only when the Maybe's
+  constructor changes from Nothing to Just or vice-versa. Whenever
+  the constructor becomes Just, an inner Dynamic will be provided,
+  whose value will track the a inside the Just; when the constructor
+  becomes Nothing, the existing inner Dynamic will become constant,
+  and will not change when the outer constructor changes back to
+  Nothing.
+
+(>>) :: forall a b. m a -> m b -> m b
+  Sequentially compose two actions, discarding any value produced
+  by the first, like sequencing operators (such as the semicolon)
+  in imperative languages.
+
+never :: (Monad f, MonadFree f m) => m a
+  A computation that never terminates
+
+ffor :: Functor f => f a -> (a -> b) -> f b
+  Flipped version of fmap.
+
+switchHold :: hoogle => Event t a
+  -> Event t (Event t a) -> m (Event t a)
+  Switches to the new event whenever it receives one. Only the
+  old event is considered the moment a new one is switched in;
+  the output event will fire at that moment only if the old
+  event does.
+
+lookup :: Key -> IntMap a -> Maybe a
+  Lookup the value at a key in the map. See also lookup.
+
+(.~) :: ASetter s t a b -> b -> s -> t
+  Replace the target of a Lens or all of the targets of a Setter
+  or Traversal with a constant value.
+
+(<$) :: a -> f b -> f a
+  Replace all locations in the input with the same value. The
+  default definition is fmap . const, but this may be overridden
+  with a more efficient version.
+
+  Using ApplicativeDo: 'a <$ bs' can be understood as the do
+  expression:
+    do bs
+       pure a
+
+switchDyn :: forall t a. Reflex t =>
+  Dynamic t (Event t a) -> Event t a
+  Switches to the new Event whenever it receives one. Only the old event
+  is considered the moment a new one is switched in; the output event
+  will fire at that moment if only if the old event does.
+
+toList :: IntMap a -> [(Key, a)]
+  Convert the map to a list of key/value pairs. Subject to list fusion.
+
+mempty :: a
+  Identity of mappend
+
+mappend :: a -> a -> a
+  An associative operation
+
+(<>) :: a -> a -> a
+  An associative operation.
+  >>> [1,2,3] <> [4,5,6]
+    [1,2,3,4,5,6]
+
+tag :: Reflex t => Behavior t b -> Event t a -> Event t b
+  Replace each occurrence value of the Event with the value
+  of the Behavior at the time of that occurrence.
+
+current :: Reflex t => Dynamic t a -> Behavior t a
+  Extract the Behavior of a Dynamic.
+
+dyn :: hoogle => Dynamic t (m a) -> m (Event t a)
+  Given a Dynamic of widget-creating actions, create a widget
+  that is recreated whenever the Dynamic updates. The returned
+  Event occurs whenever the child widget is updated, which is
+  at post-build in addition to the times at which the input
+  Dynamic is updated, and its value is the result of running
+  the widget. Note: Often, the type a is an Event, in which
+  case the return value is an Event-of-Events that would
+  typically be flattened (via switchHold).
+
+(<*>) :: f (a -> b) -> f a -> f b
+  Sequential application. A few functors support an implementation
+  of <*> that is more efficient than the default one.
+  Using ApplicativeDo: 'fs <*> as' can be understood as
+  the do expression:
+    do f <- fs
+       a <- as
+       pure (f a)
+
+dynText :: hoogle => Dynamic t Text -> m ()
+
+dyn_ :: hoogle => Dynamic t (m a) -> m ()
+  Like dyn but discards result.
+  dyn: Given a Dynamic of widget-creating
+  actions, create a widget that is recreated
+  whenever the Dynamic updates. The returned
+  Event occurs whenever the child widget is
+  updated, which is at post-build in
+  addition to the times at which the input
+  Dynamic is updated, and its value is the
+  result of running the widget. Note: Often,
+  the type a is an Event, in which case the
+  return value is an Event-of-Events that
+  would typically be flattened
+  (via switchHold).
+
+(<$>) :: Functor f => (a -> b) -> f a -> f b
+    An infix synonym for fmap.
+
+forM :: hoogle => t a -> (a -> m b) -> m (t b)
+  forM is mapM with its arguments flipped.
+  For a version that ignores the results
+  see forM_.
+  mapM: Map each element of a structure to a
+  monadic action, evaluate these actions
+  from left to right, and collect the
+  results. For a version that ignores
+  the results see mapM_.
+
+pack :: String -> Text
+  O(n) Convert a String into a Text.
+  Subject to fusion. Performs
+  replacement on invalid scalar values.
+
+leftmost :: Reflex t => [Event t a] -> Event t a
+  Create a new Event that occurs if at
+  least one of the Events in the list
+  occurs. If multiple occur at the same
+  time the value is the value of the
+  leftmost event.
+
+domEvent :: EventName eventName -> target
+  -> Event t (DomEventType target eventName)
+
+data Dynamic t :: * -> *
+  A container for a value that can change over time and
+  allows notifications on changes. Basically a combination
+  of a Behavior and an Event, with a rule that the
+  Behavior will change if and only if the Event fires.
+
+data Behavior t :: * -> *
+  A container for a value that can change over time.
+  Behaviors can be sampled at will, but it is not possible
+  to be notified when they change.
+
+data Event t :: * -> *
+  A stream of occurrences. During any given frame, an
+  Event is either occurring or not occurring; if it is
+  occurring, it will contain a value of the given type
+  (its "occurrence type")
+
+simpleList :: hoogle => Dynamic t [v]
+  -> (Dynamic t v -> m a) -> m (Dynamic t [a])
+  Create a dynamically-changing set of widgets from a
+  Dynamic list.
+
+dynText :: hoogle => Dynamic t Text -> m ()
+
+elDynClass' :: hoogle => Text -> Dynamic t Text -> m a
+ -> m (Element EventResult (DomBuilderSpace m) t, a)
+ Create a DOM element with a Dynamic class and return the element
+
+pure :: a -> f a
+  Lift a value.
+
+return :: a -> m a
+  Inject a value into the monadic type.
+
+foldDyn :: hoogle => (a -> b -> b) -> b -> Event t a
+  -> m (Dynamic t b)
+  Create a Dynamic using the initial value and change
+  it each time the Event occurs using a folding function
+  on the previous value and the value of the Event.
+
+
+--------------------------------------------------------------------
+// Backend.hs
+
+PendingConnection
+  A new client connected to the server. We haven't
+  accepted the connection yet, though.
+
+sendTextData :: WebSocketsData a => Connection -> a -> IO ()
+  Send a textual message. The message will be
+  encoded as UTF-8. This should be the default choice
+  for human-readable text-based protocols such as
+  JSON.
+
+dupTChan :: TChan a -> STM (TChan a)
+  Duplicate a TChan: the duplicate channel begins empty,
+  but data written to either channel from then on will
+  be available from both. Hence this creates a kind of
+  broadcast channel, where data written by anyone is
+  seen by everyone else.
+
+ThreadId
+  A ThreadId is an abstract type representing a handle
+  to a thread. ThreadId is an instance of Eq, Ord and
+  Show, where the Ord instance implements an
+  arbitrary total ordering over ThreadIds. The Show
+  instance lets you convert an arbitrary-valued
+  ThreadId to string form; showing a ThreadId value is
+  occasionally useful when debugging or diagnosing the
+  behaviour of a concurrent program.
+
+
+forkIO :: IO () -> IO ThreadId
+  Creates a new thread to run the IO computation passed
+  as the first argument, and returns the ThreadId of
+  the newly created thread. The new thread will be a
+  lightweight, unbound thread.
+
+
+readTVar :: TVar a -> STM a
+  Return the current value stored in a TVar.
+
+TVar a
+  Shared memory locations that support atomic memory transactions.
+
+TChan a
+  TChan is an abstract type representing an unbounded FIFO channel.
+
+receiveData :: WebSocketsData a => Connection -> IO a
+  Receive a message, converting it to whatever format is needed.
+
+writeTVar :: TVar a -> a -> STM ()
+  Write the supplied value into a TVar.
+
+stateTvar :: TVar s -> (s -> (a, s)) -> STM a
+  Like modifyTVar' (mutates content) but the function is a
+  simple state transition that can return a side value which
+  is passed on as the result of the STM.
+
+STM a
+  A monad supporting atomic memory transactions.
+
+readTVarIO :: TVar a -> IO a
+  Return the current value stored in a TVar. This is equivalent to
+    readTVarIO = atomically . readTVar
+
+atomically :: STM a -> IO a
+  Performs a series of STM actions atomically.
+
+adjust :: (a -> a) -> Key -> IntMap a -> IntMap a
+
+set :: ASetter s t a b -> b -> s -> t
+
+lookup :: Key -> IntMap a -> Maybe a
+
+writeTChan :: TChan a -> a -> STM ()
+  Write a value to a TChan.
+
+  class Functor f => Applicative f where
+    A functor with application, providing operations to
+      i) embed pure expressions (pure), and
+      ii) sequence computations and combine their results
+          (<*> and liftA2).
+
+forever :: Applicative f => f a -> f b
+  Repeat an action indefinitely.
+
+readTChan :: TChan a -> STM a
+  Read the next value from the TChan.
+
+over :: ASetter s t a b -> (a -> b) -> s -> t
+  Modify the target of a Lens or all the targets of a
+  Setter or Traversal with a function.
+
+(<|) :: a -> NonEmpty a -> NonEmpty a
+  Prepend an element to the stream.
+
+(=<<) :: Monad m => (a -> m b) -> m a -> m b
+  Sequentially compose two actions, passing any value
+  produced by the second as an argument to the first.
+    'bs =<< as' can be understood as the do expression
+      do a <- as
+        bs a
+
+filter :: (a -> Bool) -> NonEmpty a -> [a]
+
+nonEmpty :: [a] -> Maybe (NonEmpty a)
+
+fmapMaybe :: Filterable f => (a -> Maybe b)
+  -> f a -> f b
+
+maybe :: b -> (a -> b) -> Maybe a -> b
+  The maybe function takes a default value, a function, and a
+  Maybe value. If the Maybe value is Nothing, the function
+  returns the default value. Otherwise, it applies the
+  function to the value inside the Just and returns the result.
+
+maximumMay :: Ord a => [a] -> Maybe a
+
+insert :: Key -> a -> IntMap a -> IntMap a
+  O(min(n,W)). Insert a new key/value pair in the map. If the
+  key is already present in the map, the associated value is
+  replaced with the supplied value, i.e. insert is equivalent to
+  insertWith const.
+
+keys :: IntMap a -> [Key]
+  O(n). Return all keys of the map in ascending order. Subject
+  to list fusion.
+
+newTVarIO :: a -> IO (TVar a)
+  IO version of newTVar. This is useful for creating top-level
+  TVars using unsafePerformIO, because using atomically inside
+  unsafePerformIO isn't possible.
+
+mempty :: a
+  Identity of mappend
+  mappend :: a -> a -> a
+    An associative operation
+    (<>) :: a -> a -> a
+      [1,2,3] <> [4,5,6]
+
+newBroadcastTChanIO :: IO (TChan a)
+  IO version of newBroadcastTChan.
+  newBroadcastTChan :: STM (TChan a)
+  Create a write-only TChan. More precisely, readTChan will
+  retry even after items have been written to the channel.
+  The only way to read a broadcast channel is to duplicate
+  it with dupTChan.
+
+  Consider a server that broadcasts messages to clients:
+    serve :: TChan Message -> Client -> IO loop
+    serve broadcastChan client = do
+      myChan <- dupTChan broadcastChan
+      forever $ do
+          message <- readTChan myChan
+          send client message
+
+  The problem with using newTChan to create the broadcast
+  channel is that if it is only written to and never read,
+  items will pile up in memory. By using newBroadcastTChan
+  to create the broadcast channel, items can be garbage
+  collected after clients have seen them.
+
+runWebSocketsSnap :: MonadSnap m => ServerApp -> m ()
+  The following function escapes from the current Snap
+  handler, and continues processing the WebSockets action.
+  The action to be executed takes the Request as a
+  parameter, because snap has already read this from
+  the socket.

@@ -75,8 +75,8 @@ data InvalidHintInput
 codeWordsSocket :: CodewordsM t m
   => Event t ClientMsg -> m (Event t ServerMsg)
 codeWordsSocket send = do
-  --rawWebsocket <- jsonWebSocket "wss://codewords.app/websocket" $ def
-  rawWebsocket <- jsonWebSocket "ws://localhost:8000/websocket" $ def
+  rawWebsocket <- jsonWebSocket "wss://codewords.app/websocket" $ def
+  --rawWebsocket <- jsonWebSocket "ws://localhost:8000/websocket" $ def
     & webSocketConfig_send .~ (fmap pure send)
 
   return $ fmapMaybe id $ _webSocket_recv rawWebsocket
@@ -745,18 +745,6 @@ frontend = Frontend
       elAttr "meta" ("name" =: "viewport" <> "content" =: "width=device-width, \
         \initial-scale=1") blank
   , _frontend_body = elClass "div" "w-screen h-screen bg-gray-500" $ do
-
-      {- Counter
-      counter <- foldDyn (+) (0 :: Integer) $ leftmost [(1 <$ clickEvent), ((-1) <$ clickEventG)]
-      (g, _) <- el' "button" $ text "sda"
-      dynText $ T.pack.show <$> counter
-      (e, _) <- el' "button" $ text "ads"
-      let clickEvent = domEvent Click e
-          clickEventG = domEvent Click g
-
-      inputTextBox <- inputElement def
-      dynText $ fmap T.reverse $ _inputElement_value inputTextBox
-      --}
 
       prerender_ blank $ liftJSM $ void $ eval ("" :: T.Text)
       prerender_ blank $ mdo

@@ -12,12 +12,14 @@ import Common.Protocol
 import Common.Route
 import Control.Concurrent
 import Control.Concurrent.STM
+import Control.Exception as E
 import Control.Monad
 import Obelisk.Backend
 import Obelisk.Route hiding (decode, encode)
 import Safe
 
 import Data.Aeson
+import Data.Bool (bool)
 import Data.IntMap as M
 import Data.List as L (filter)
 import qualified Data.List.NonEmpty as NE
@@ -49,28 +51,65 @@ systemUser :: User
 systemUser = User ("SYSTEM" :: T.Text) (UserID (-1))
 
 handleNewConnection :: Maybe User -> ServerState -> Connection -> IO ()
-
 handleNewConnection mUser state connection = do
-  let s = sendTextData connection.encode
-  a <- receiveData connection
-  case decode a of
-    Just decodedMsg -> do
-      newMUser <- handleClientMsg state mUser decodedMsg s connection
-      handleNewConnection newMUser state connection
+  E.handle handleException $ do
+    let s = sendTextData connection.encode
+    a <- receiveData connection
 
-    _  ->
-      handleNewConnection mUser state connection
+    case decode a of
+      Just decodedMsg -> do
+        newMUser <- handleClientMsg state mUser decodedMsg s connection
+        handleNewConnection newMUser state connection
+
+      _  ->
+        handleNewConnection mUser state connection
+
+  where handleException (CloseRequest _ _) = handleClosedConnection mUser state
+        handleException (ConnectionClosed) = handleClosedConnection mUser state
+        handleException _ = return ()
 
 handleWebsocket :: ServerState -> PendingConnection -> IO ()
 handleWebsocket s p = do
   fullConnection <- acceptRequest p
   let sendFn = sendTextData fullConnection.encode
+
   bc <- atomically $ dupTChan (broadcast s)
   forkIO $ handleTChanComms fullConnection bc
+
   roomIntMap <- atomically $ readTVar (rooms s)
   sendFn (RoomList roomIntMap)
+
   handleNewConnection Nothing s fullConnection
   return ()
+
+
+handleClosedConnection :: Maybe User -> ServerState -> IO ()
+handleClosedConnection mUser s = do
+    case mUser of
+      Just u -> do
+        atomically $ modifyTVar' (usersConnected s) $ \list ->
+          L.filter (\x -> (/=) (_userID u) $ uID x) list
+
+        rIntMap <- readTVarIO (rooms s)
+        let mRID = findRoomID u rIntMap
+
+        case mRID of
+          Just rID -> do
+            mRoom <- removeUserOrRoom (rooms s) (broadcast s) rID $
+              removeUserFromRoom u
+            let hasMinPlayers = enoughPlayers mRoom
+
+            case mRoom of
+              Just _ -> do
+                bool (endGame s rID) (return ()) hasMinPlayers
+                tryUpdateRoom (rooms s) (broadcast s) rID
+                  $ appendRoomChatMsg $ RoomChatMessage systemUser (
+                    (_name u) <> " has left the room."
+                  )
+                return ()
+              Nothing -> return ()
+          Nothing -> return ()
+      Nothing -> return ()
 
 
 handleClientMsg :: ServerState -> Maybe User -> ClientMsg
@@ -232,23 +271,7 @@ handleClientMsg state mUser cMsg sendFn connection = do
     EndGame roomID -> do
       mRoom <- roomExist (rooms state) roomID
       case mRoom of
-        Just _ -> do
-          newR <- updateFn roomID $ changeToLobby
-
-          case newR of
-            Just r' -> do
-              usConnected <- readTVarIO (usersConnected state)
-
-              let rPlayers = NE.toList $ _roomPlayers r'
-              sendUsersServerMsg rPlayers (GameEnded roomID)
-                usConnected
-
-              sendUsersServerMsg rPlayers (RoomChanged roomID r')
-                usConnected
-              return ()
-
-            Nothing -> return ()
-
+        Just _ -> endGame state roomID
         Nothing -> return ()
       return mUser
 
@@ -270,6 +293,24 @@ enoughPlayers (Just r)
   | (NE.length $ _roomPlayers r) > 3 = True
   | otherwise = False
 enoughPlayers _ = False
+
+endGame :: ServerState -> Int -> IO ()
+endGame state roomID = do
+  newR <- tryUpdateRoom (rooms state) (broadcast state) roomID changeToLobby
+
+  case newR of
+    Just r' -> do
+      usConnected <- readTVarIO (usersConnected state)
+
+      let rPlayers = NE.toList $ _roomPlayers r'
+      sendUsersServerMsg rPlayers (GameEnded roomID)
+        usConnected
+
+      sendUsersServerMsg rPlayers (RoomChanged roomID r')
+        usConnected
+      return ()
+
+    Nothing -> return ()
 
 revealCIfNotAlr :: Codeword -> GameState -> Int -> ServerState
   -> IO ()
@@ -331,7 +372,6 @@ roomExist rTVar rID = do
   rIntMap <- readTVarIO rTVar
   return $ M.lookup rID rIntMap
 
-
 deleteRoom :: TVar (IntMap Room) -> Int
   -> IO (Maybe Room)
 deleteRoom rTVar rID = atomically $ stateTVar rTVar $ \r ->
@@ -361,6 +401,11 @@ handleTChanComms c t = forever $ do
   s <- atomically $ readTChan t
   sendFn s
 
+findRoomID :: User -> IntMap Room -> Maybe Int
+findRoomID u rIntMap = f $ M.keys $ M.filter
+  (\r -> elem u (_roomPlayers r)) rIntMap
+  where f [k] = Just k
+        f _ = Nothing
 
 appendUserToRoom :: User -> Room
   -> Room
@@ -370,10 +415,10 @@ appendUserToRoom u r = addUser r
 removeUserFromRoom :: User -> Room
   -> Room
 removeUserFromRoom u r = do
-
   let oldMembers = _roomPlayers r
       newMembers = NE.nonEmpty $ NE.filter
         (\newU -> _userID u /= _userID newU) oldMembers
+
   case newMembers of
     Just p -> do
       let newR = r {_roomPlayers = p}

@@ -10,6 +10,13 @@ liftJSM :: MonadJSM m => JSM a -> m a
   The liftJSM is to JSM what liftIO is to IO. When
   using GHCJS it is liftIO.
 
+pure :: a -> f a
+  Lift a value.
+
+return :: a -> m a
+  Inject a value into the monadic type.
+
+
 liftIO :: IO a -> m a
   Lift a computation from the IO monad.
 

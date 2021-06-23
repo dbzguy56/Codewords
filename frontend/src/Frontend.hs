@@ -33,11 +33,11 @@ import Obelisk.Frontend
 import Obelisk.Route
 import Obelisk.Generated.Static
 import Language.Javascript.JSaddle
-{-
+
 import GHCJS.DOM (currentWindowUnchecked)
 import qualified GHCJS.DOM.Window as Window
 import qualified GHCJS.DOM.Location as Location
--}
+
 import Reflex.Dom.Core
 
 type CodewordsM t m = ( DomBuilder t m , PostBuild t m , TriggerEvent t m
@@ -71,26 +71,19 @@ data InvalidHintInput
   | InvalidChars
   | ContainsCodeword
   deriving Show
-
-codeWordsSocket :: CodewordsM t m
-  => Event t ClientMsg -> m (Event t ServerMsg)
-codeWordsSocket send = do
-  rawWebsocket <- jsonWebSocket "wss://codewords.app/websocket" $ def
-  --rawWebsocket <- jsonWebSocket "ws://localhost:8000/websocket" $ def
-    & webSocketConfig_send .~ (fmap pure send)
-
-  return $ fmapMaybe id $ _webSocket_recv rawWebsocket
 {-
 codeWordsSocket :: CodewordsM t m
   => Event t ClientMsg -> m (Event t ServerMsg)
 codeWordsSocket send = do
-  {-
-    pure :: a -> f a
-      Lift a value.
+  --rawWebsocket <- jsonWebSocket "wss://codewords.app/websocket" $ def
+  rawWebsocket <- jsonWebSocket "ws://localhost:8000/websocket" $ def
+    & webSocketConfig_send .~ (fmap pure send)
 
-    return :: a -> m a
-      Inject a value into the monadic type.
-  -}
+  return $ fmapMaybe id $ _webSocket_recv rawWebsocket
+-}
+codeWordsSocket :: CodewordsM t m
+  => Event t ClientMsg -> m (Event t ServerMsg)
+codeWordsSocket send = do
   wsPath <- getWebsocketPath
   rawWebsocket <- jsonWebSocket (wsPath <> "websocket") $ def
     & webSocketConfig_send .~ (fmap pure send)
@@ -113,7 +106,7 @@ getWebsocketPath = liftJSM $ do
           a -> a
       in
       wsProtocol <> "/" <> h <> "/"
--}
+
 showMsgs :: (MonadHold t m, MonadFix m
   , DomBuilder t m, PostBuild t m)
   => Event t T.Text -> m ()

@@ -14,6 +14,7 @@ module Frontend where
 import Common.Codewords
 import Common.Protocol
 import Common.Route
+import Control.Applicative
 import Control.Lens
 import Control.Monad
 import Control.Monad.Fix
@@ -71,16 +72,7 @@ data InvalidHintInput
   | InvalidChars
   | ContainsCodeword
   deriving Show
-{-
-codeWordsSocket :: CodewordsM t m
-  => Event t ClientMsg -> m (Event t ServerMsg)
-codeWordsSocket send = do
-  --rawWebsocket <- jsonWebSocket "wss://codewords.app/websocket" $ def
-  rawWebsocket <- jsonWebSocket "ws://localhost:8000/websocket" $ def
-    & webSocketConfig_send .~ (fmap pure send)
 
-  return $ fmapMaybe id $ _webSocket_recv rawWebsocket
--}
 codeWordsSocket :: CodewordsM t m
   => Event t ClientMsg -> m (Event t ServerMsg)
 codeWordsSocket send = do
@@ -126,7 +118,7 @@ roomChatWidget n u dmGS dRC = do
           let uS = fmap userSpeaking rChat
               tColor = zipDynWith (maybe "text-purple-600") (getTColor <$> uS) dmGS
 
-          elDynClass "span" tColor $ dynText $ fmap _name uS
+          elDynClass "span" tColor $ dynText $ getNonEmptyText <$> fmap _name uS
           text ": "
           dynText $ fmap chatMessage rChat
         )
@@ -155,24 +147,6 @@ roomChatWidget n u dmGS dRC = do
 
         getTColor uS x = teamColor $
           maybe Blue snd $ getUserRoleTeam (_userID uS) x
-
-
-data RoleStatus
-  = NotAnyRole
-  | SpeakerFor Team
-  | GuesserFor Team
-  | ListenerFor Team
-
-getRoleStatus :: GameState -> UserID -> RoleStatus
-getRoleStatus gs uID
-  | uID == (_blueSpeaker $ _speakers gs) = SpeakerFor Blue
-  | uID == (_redSpeaker $ _speakers gs) = SpeakerFor Red
-  | uID == (_blueGuesser $ _guessers gs) = GuesserFor Blue
-  | uID == (_redGuesser $ _guessers gs) = GuesserFor Red
-  | elem uID $ _blueListeners $ _listeners gs = ListenerFor Blue
-  | elem uID $ _redListeners $ _listeners gs = ListenerFor Red
-  | otherwise = NotAnyRole
-
 
 styleCard :: RoleStatus -> Codeword -> GameState -> T.Text
 styleCard _ (Codeword _ o True) _ = T.pack $ (++) (cardColor o) "700"
@@ -219,7 +193,7 @@ getCurrentSpeakerName gs us = getName (NE.toList us) $ getUID (_currentTurn gs)
 
 getName :: [User] -> UserID -> Maybe T.Text
 getName (p:ps) uID
-  | uID == (_userID p) = Just (_name p)
+  | uID == (_userID p) = Just $ getNonEmptyText (_name p)
   | otherwise = getName ps uID
 getName [] _ = Nothing
 
@@ -231,10 +205,6 @@ getUserRoleTeam uID gs = do
         role (GuesserFor t) = Just ("Guesser", t)
         role (ListenerFor t) = Just ("Listener", t)
         role _ = Nothing
-
-justTrue :: Maybe a -> Bool
-justTrue (Just _) = True
-justTrue _ = False
 
 gameBoardUI :: CodewordsM t m => UserID
   -> Dynamic t GameState -> m (Event t Codeword)
@@ -309,9 +279,9 @@ ifGuessing dCurrentG roomID dTP = do
   switchHold never e'
 
 gameBoardWidget :: CodewordsM t m => Int -> Dynamic t Bool
-  -> Dynamic t Room -> User -> m (Event t ClientMsg)
+  -> Dynamic t ClientRoom -> User -> m (Event t ClientMsg)
 gameBoardWidget n adminStatus r u = do
-  dmGS <- maybeDyn $ _roomGameState <$> r
+  dmGS <- maybeDyn $ _clientRGameState <$> r
   e <- dyn $ ffor dmGS $ \case
     Just gs -> do
       displayRoleBar u gs
@@ -337,9 +307,9 @@ isCurrentGuesser (GuesserFor userT) currentT = userT == currentT
 isCurrentGuesser _ _ = False
 
 displaySideBar :: CodewordsM t m => Int -> User
-  -> Dynamic t Room -> m (Event t ClientMsg)
+  -> Dynamic t ClientRoom -> m (Event t ClientMsg)
 displaySideBar n u r = do
-  rGS <- maybeDyn (_roomGameState <$> r)
+  rGS <- maybeDyn (_clientRGameState <$> r)
   e <- dyn $ ffor rGS $ \case
     Just gs -> do
       let dCSpeaker = isCurrentSpeaker <$> ((flip getRoleStatus $ _userID u)
@@ -349,22 +319,21 @@ displaySideBar n u r = do
       dSCP <- holdUniqDyn dSpeakerCluePicking
       e' <- dyn $ ffor dSCP $ \case
         True -> displaySpeakerView n (_gameBoard <$> gs)
-        False -> roomChatWidget n u (_roomGameState <$> r) (fmap (_roomChat) r)
+        False -> roomChatWidget n u (_clientRGameState <$> r) (fmap (_clientRChat) r)
       switchHold never e'
-    Nothing -> roomChatWidget n u (_roomGameState <$> r) (fmap (_roomChat) r)
+    Nothing -> roomChatWidget n u (_clientRGameState <$> r) (fmap (_clientRChat) r)
   switchHold never e
   where isCluePicking CluePicking = True
         isCluePicking _ = False
 
 
-parseHintInput :: Board -> T.Text -> Int
+parseHintInput :: Board -> NonEmptyText -> Int
   -> Either InvalidHintInput Clue
-parseHintInput b t g
-  | (T.strip t) == "" = Left FieldEmpty
+parseHintInput b (NonEmptyText t) g
   | (length $ T.words t) > 1 = Left MultipleWords
   | checkNonLetters (T.toLower $ T.strip t) = Left InvalidChars
   | checkCodewords (T.toLower $ T.strip t) b = Left ContainsCodeword
-  | otherwise = Right (Clue (T.strip t) g (g + 1))
+  | otherwise = Right (Clue (NonEmptyText (T.strip t)) g (g + 1))
 
   where checkNonLetters w = not $ T.null
           $ T.dropWhile isAlpha w
@@ -386,24 +355,27 @@ hintErrMsg ContainsCodeword = "Hint cannot contain a codeword!"
 displaySpeakerView :: CodewordsM t m => Int
   -> Dynamic t Board -> m (Event t ClientMsg)
 displaySpeakerView n dGB = do
-  cMsg <- elClass "div" "flex flex-col justify-between bg-gray-600 \
+  elClass "div" "flex flex-col justify-between bg-gray-600 \
     \ h-full text-center" $ mdo
 
     elClass "div" "" $ text "Give your team a one word hint!"
-
-    eitherC <- elClass "div" "" $ do
+    dMDEitherClue' <- elClass "div" "" $ do
       elClass "div" "" $ text "HINT"
       h <- inputElement $ def
 
-      let elVal = _inputElement_value h
-          eitherClue = parseHintInput <$> dGB <*> elVal <*> guesses
-      eitherClue' <- eitherDyn eitherClue
-      dyn_ $ ffor eitherClue' $ \case
-        Left a -> do
-          elClass "div" "bg-red-300" $ dynText $ hintErrMsg <$> a
-        _ -> return ()
 
-      return eitherClue
+      let elVal = _inputElement_value h
+          dMElVal = mkNonEmptyText <$> elVal
+      -- Dynamic (Maybe ( Dynamic (Either InvalidHintInput Clue)))
+      dMDEitherClue <- maybeDyn $ f' <$> (f <$> dGB <*> guesses) <*> dMElVal
+      dyn_ $ ffor dMDEitherClue $ \case
+        Just dEInvalidClue ->
+          dyn_ $ ffor dEInvalidClue $ \case
+            Left a -> elClass "div" "bg-red-300" $ text $ hintErrMsg a
+            Right _ -> return ()
+        Nothing -> return ()
+
+      return dMDEitherClue
 
     guesses <- elClass "div" "" $ do
       elClass "div" "" $ text "RELATED WORDS TO HINT"
@@ -424,18 +396,16 @@ displaySpeakerView n dGB = do
         return dInt'
       return g
 
-
     let btnColor = "bg-gray-400"
     (e, _) <- elClass' "button" btnColor (text "SUBMIT HINT")
 
-    eitherC' <- eitherDyn eitherC
-    e2 <- dyn $ ffor eitherC' $ \case
-      Right c ->
-        return $ tag (current $ SendClue n <$> c) $ domEvent Click e
-      Left _ -> return never
-    switchHold never e2
+    return $ switchDyn $ ffor dMDEitherClue' $ \case
+      Just dEInvalidClue' -> do
+        switchDyn $ ffor dEInvalidClue' $ \case
+          Right c' -> (SendClue n c') <$ domEvent Click e
+          Left _ -> never
+      Nothing -> never
 
-  return cMsg
   where btn label fn = do
           (e, _) <- el' "button" $ text label
           return $ fn <$ domEvent Click e
@@ -445,13 +415,21 @@ displaySpeakerView n dGB = do
         decFn 0 = 0
         decFn x = subtract 1 x
 
+        f :: Board -> Int
+          -> (NonEmptyText -> (Either InvalidHintInput Clue))
+        f gb gs = (flip (parseHintInput gb) gs)
 
-displayTopMessageBar :: CodewordsM t m => Dynamic t Room
+        f' :: (NonEmptyText -> (Either InvalidHintInput Clue))
+          -> Maybe NonEmptyText -> Maybe (Either InvalidHintInput Clue)
+        f' partialF mNE = partialF <$> mNE
+
+
+displayTopMessageBar :: CodewordsM t m => Dynamic t ClientRoom
   -> m ()
 displayTopMessageBar r = do
   elDynClass "div" "flex whitespace-pre-wrap \
     \ justify-center bg-gray-600 h-auto lg:text-3xl" $ do
-    rGs <- maybeDyn (_roomGameState <$> r)
+    rGs <- maybeDyn (_clientRGameState <$> r)
     dyn_ $ ffor rGs $ \case
       Just gs -> do
         dWinner <- maybeDyn (_winner <$> gs)
@@ -461,12 +439,12 @@ displayTopMessageBar r = do
               dynText $ T.pack.show <$> t
             text " team wins!"
           Nothing -> do
-            let rPs = _roomPlayers <$> r
+            let rPs = _clientRPlayers <$> r
             turnPhaseMsg gs rPs
 
       Nothing -> do
-        let rPs = (NE.toList._roomPlayers) <$> r
-            adminID = _roomAdminID <$> r
+        let rPs = (NE.toList._clientRPlayers) <$> r
+            adminID = _clientRAdminID <$> r
 
         dAdminName <- maybeDyn (getName <$> rPs <*> adminID)
         dyn_ $ ffor dAdminName $ \case
@@ -497,7 +475,7 @@ turnPhaseMsg dGS dPs = do
     (Guessing (Clue h rWords _)) -> do
       elClass "span" "flex justify-between w-full px-2" $ do
         el "div" $ do
-          elClass "span" "color-red-600" $ text $ "HINT: " <> h
+          elClass "span" "color-red-600" $ text $ "HINT: " <> (getNonEmptyText h)
 
         el "div" $ do
           text "Guesser: "
@@ -515,8 +493,8 @@ teamColor Blue = "text-blue-600"
 teamColor Red = "text-red-600"
 
 openRoomInfoDialog :: CodewordsM t m => Event t Bool
-  -> T.Text -> m (Event t T.Text)
-openRoomInfoDialog eToggle initialRoomName = mdo
+  -> NonEmptyText -> m (Event t NonEmptyText)
+openRoomInfoDialog eToggle (NonEmptyText initialRoomName) = mdo
   dOpen <- holdDyn False $ leftmost [eToggle, False <$ eClose]
   let mkStyles b = T.intercalate " "
         ["absolute flex justify-center \
@@ -541,30 +519,30 @@ openRoomInfoDialog eToggle initialRoomName = mdo
 
       let saveE = tag (current $ _inputElement_value iE) $ domEvent Click saveBtn
           cancelE = domEvent Click cancelBtn
+          saveE' = fmapMaybe mkNonEmptyText saveE
+      return $ leftmost [saveE', (NonEmptyText initialRoomName) <$ cancelE]
 
-      return $ leftmost [saveE, initialRoomName <$ cancelE]
-
-  return $ ffilter (\x -> ((/=) initialRoomName x) && ((/=) "" x)) eClose
+  return $ ffilter (\(NonEmptyText x) -> ((/=) initialRoomName x)) eClose
 
 
-handleChangeRoomInfo :: CodewordsM t m => Int -> Dynamic t Room
+handleChangeRoomInfo :: CodewordsM t m => Int -> Dynamic t ClientRoom
   -> m (Event t ClientMsg)
 handleChangeRoomInfo n dR = do
   btn <- elClass "span" "" $
     btnWidget "ml-2 px-1 bg-gray-600 rounded-lg" "Change"
 
-  eT <- dyn $ (openRoomInfoDialog (True <$ btn)) <$> (_roomName <$> dR)
+  eT <- dyn $ (openRoomInfoDialog (True <$ btn)) <$> (_clientRName <$> dR)
   eT' <- switchHold never eT
 
   return $ ChangeRoomName n <$> eT'
 
 
-displayRoom :: CodewordsM t m => Int -> Dynamic t Room -> User
+displayRoom :: CodewordsM t m => Int -> Dynamic t ClientRoom -> User
   -> RoomStateView -> m (Event t ClientMsg)
 displayRoom n r u v = do
   r' <- holdUniqDyn r
   elClass "div" "flex flex-col h-screen select-none" $ do
-    let rAdminID = fmap _roomAdminID r'
+    let rAdminID = fmap _clientRAdminID r'
     let adminStatus = isUserAdmin rAdminID (return u)
     elClass "div" "flex justify-center bg-gray-700 xl:h-16 \
       \ 2xl:h-8 rounded lg:text-5xl" $
@@ -578,13 +556,13 @@ displayRoom n r u v = do
           LobbyView -> do
             eRN' <- elClass "div" "flex" $ do
               eRN <- elDynClass "div" "p-1 flex-grow bg-gray-700 rounded-t" $ do
-                dynText $ fmap (\room -> "Room: " <> _roomName room) r'
+                dynText $ fmap (\room -> ("Room: " <> getNonEmptyText (_clientRName room))) r'
                 displayIfAdmin adminStatus (handleChangeRoomInfo n r') (return never)
 
               elClass "div" "lg:px-10 2xl:px-3 bg-gray-600 rounded-full" $ text "?"
               return eRN
 
-            displayRoomUsers rAdminID (fmap _roomPlayers r')
+            displayRoomUsers rAdminID (fmap _clientRPlayers r')
 
             eBtn <- elClass "div" "flex flex-row justify-between h-1/6" $ do
               let btnStyles = "m-2 p-1 bg-gray-600 rounded-lg"
@@ -621,12 +599,11 @@ displayIfAdmin adminStatus adminAction defAction
         doFn True  = adminAction
 
 
-displayRoomCard :: CodewordsM t m => Dynamic t (Int, Room)
+displayRoomCard :: CodewordsM t m => Dynamic t (Int, ClientRoom)
   -> m (Event t Int)
 displayRoomCard r = do
-  (e, _) <- el' "div" $ dynText $ fmap (_roomName.snd) r
+  (e, _) <- el' "div" $ dynText $ fmap (getNonEmptyText._clientRName.snd) r
   return $ tag (current $ fmap fst r) $ domEvent Click e
-
 
 displayRoomUsers :: CodewordsM t m => Dynamic t UserID
   -> Dynamic t (NonEmpty User) -> m ()
@@ -637,67 +614,102 @@ displayRoomUsers adminID users = elClass "div" "px-4 h-full" $ do
         let adminStatus = isUserAdmin adminID u
         let defaultStyle = "px-2 bg-gray-400 rounded"
         elDynClass "div" (T.append <$> (defaultStyle) <*>
-          (fmap makeAdminStyle adminStatus)) $ dynText $ fmap _name u
+          (fmap makeAdminStyle adminStatus)) $ dynText
+            $ getNonEmptyText <$> fmap _name u
       )
   return ()
   where makeAdminStyle True  = " text-yellow-300"
         makeAdminStyle False = ""
 
-roomsWidget :: CodewordsM t m => Event t (IntMap Room)
-  -> Event t (Int, Room) -> Event t Int -> m (Dynamic t (IntMap Room))
+roomsWidget :: CodewordsM t m => Event t (IntMap ClientRoom)
+  -> Event t (Int, ClientRoom) -> Event t Int -> m (Dynamic t (IntMap ClientRoom))
 roomsWidget rList e deleteEvent =
   foldDyn ($) mempty $ leftmost [ fmap mappend rList
   , fmap (\(i, r) -> insert i r) e
   , fmap delete deleteEvent]
 
 
-roomListWidget :: CodewordsM t m => Dynamic t (IntMap Room)
+roomListWidget :: CodewordsM t m => Dynamic t (IntMap ClientRoom)
   -> m (Event t Int)
 roomListWidget rList = do
   eList <- el "div" $ simpleList (fmap M.toList rList) displayRoomCard
   return $ switchDyn $ leftmost <$> eList
 
+inputTextBoxLabel :: CodewordsM t m => T.Text
+  -> T.Text -> Event t a
+  -> m (Dynamic t T.Text, Event t ())
+inputTextBoxLabel labelName style eClear = do
+  elClass "div" "flex flex-col" $ do
+    el "span" $ text labelName
+    inputTextBox style eClear
 
-inputTextBoxBtnWidget :: CodewordsM t m
-  => T.Text -> T.Text -> m (Event t T.Text)
-inputTextBoxBtnWidget btnText style = mdo
-  inputTextBox <- inputElement $ def
+inputMNonEmptyTextBoxLabel :: CodewordsM t m => T.Text
+  -> T.Text -> m (Dynamic t (Maybe NonEmptyText))
+inputMNonEmptyTextBoxLabel labelName style = do
+  elClass "div" "flex flex-col" $ do
+    el "span" $ text labelName
+    inputMNonEmptyTextBox style
+
+inputMNonEmptyTextBox :: CodewordsM t m => T.Text
+  -> m (Dynamic t (Maybe NonEmptyText))
+inputMNonEmptyTextBox style = do
+  (elVal, _) <- inputTextBox style never
+  return $ mkNonEmptyText <$> elVal
+
+inputTextBox :: CodewordsM t m => T.Text -> Event t a
+  -> m (Dynamic t T.Text, Event t ())
+inputTextBox style eClear = do
+  iE <- inputElement $ def
     & inputElementConfig_elementConfig
     . elementConfig_initialAttributes
     .~ ("autofocus" =: "" <> "style" =: style
       <> "placeholder" =: "Type something here...")
-    & inputElementConfig_setValue .~ ("" <$ send)
+    & inputElementConfig_setValue .~ ("" <$ eClear)
+  return (_inputElement_value iE,
+    keypress Enter (_inputElement_element iE))
 
+inputTextBoxBtnWidget :: CodewordsM t m
+  => T.Text -> T.Text -> m (Event t T.Text)
+inputTextBoxBtnWidget btnText style = mdo
+  (elVal, enter) <- inputTextBox style send
   (e, _) <- elClass' "button" "bg-gray-100" $ text btnText
 
   let clicked = domEvent Click e
-      enter = keypress Enter (_inputElement_element
-        inputTextBox)
       send = leftmost [clicked, enter]
-      elVal = _inputElement_value inputTextBox
 
-  e' <- dyn $ ffor ((&&) <$> (notEmpty <$> elVal)
-    <*> ((/=) "SYSTEM" <$> elVal)) $ \case
+  e' <- dyn $ ffor ((/=) "SYSTEM" <$> elVal) $ \case
     False -> return never
     True -> return $ tag (current elVal) send
   switchHold never e'
-  where notEmpty t
-          | (T.strip t) == "" = False
-          | otherwise = True
 
 signInWidget :: CodewordsM t m => m (Event t ClientMsg)
 signInWidget = do
-  elClass "div" "text-5xl" $ do
-    eventText <- inputTextBoxBtnWidget "Choose this name" ""
-    return $ fmap CreateName eventText
+  nonEmptyText <- elClass "div" "text-5xl" $ do
+    dMNonEmptyText <- inputMNonEmptyTextBoxLabel "Choose a username" ""
+    (btnE, _) <- el' "button" $ text "Create User"
+    let eventNonEmptyText = fmapMaybe id $ tag (current dMNonEmptyText) $ domEvent Click btnE
+    return $ eventNonEmptyText
+  return $ CreateName <$> nonEmptyText
 
-homeViewWidget :: CodewordsM t m => Dynamic t (IntMap Room) -> User
+homeViewWidget :: CodewordsM t m => Dynamic t (IntMap ClientRoom) -> User
   -> m (Event t ClientMsg)
 homeViewWidget rList u = do
-  el "div" $ text $ "Welcome " <> _name u <> " ID: " <> tShow (_userID u)
-  e <- inputTextBoxBtnWidget "Create Room" ""
+  el "div" $ text $ "Welcome " <> (getNonEmptyText $ _name u) <> " ID: " <> tShow (_userID u)
+  dMName <- inputMNonEmptyTextBoxLabel "Room Name: " ""
+  dMPass <- inputMNonEmptyTextBoxLabel "Room Password: " ""
+  (btnE, _) <- el' "button" $ text "Create Room"
+
+  -- dMName :: Dynamic (Maybe NonEmptyText)
+  let dMMsg = liftA2 f dMName dMPass
+      dMsg = fmapMaybe id $ tag (current dMMsg) $ domEvent Click btnE
+
   roomClicked <- roomListWidget rList
-  return $ leftmost [fmap JoinRoom roomClicked, fmap (flip CreateRoom Nothing) e]
+  return $ leftmost [fmap (flip JoinRoom Nothing) roomClicked
+    , dMsg ]
+
+  -- in the end what we want is Maybe (CreateRoom NonEmptyText (Maybe NonEmptyText))
+  where f :: Maybe NonEmptyText -> Maybe NonEmptyText -> Maybe ClientMsg
+        f mName mPass = flip CreateRoom mPass <$> mName
 
 changeView :: ServerMsg -> View -> View
 changeView (GameStarted rID) (LoggedIn u _) = LoggedIn u $ RoomView rID GameView
@@ -710,7 +722,7 @@ changeView (GameEnded rID) (LoggedIn u _) = LoggedIn u $ RoomView rID LobbyView
 changeView (RoomJoined rID) (LoggedIn u _) = LoggedIn u $ RoomView rID LobbyView
 changeView _ v = v
 
-router :: CodewordsM t m => Dynamic t (IntMap Room) -> View
+router :: CodewordsM t m => Dynamic t (IntMap ClientRoom) -> View
   -> m (Event t ClientMsg)
 router _ SignIn = signInWidget
 router r (LoggedIn u HomeView) = homeViewWidget r u

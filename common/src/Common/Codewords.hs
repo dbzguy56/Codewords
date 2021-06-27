@@ -24,8 +24,16 @@ testWords = ["Apple", "Blue", "Code", "Dart", "Ear", "Fart", "Green"
             , "Yeast", "Zoo"]
 
 newtype UserID = UserID Int
+newtype NonEmptyText =
+  NonEmptyText { getNonEmptyText :: T.Text
+               }
+  deriving (Eq, Show)
+
+mkNonEmptyText :: T.Text -> Maybe NonEmptyText
+mkNonEmptyText t
+  | (T.strip t) == "" = Nothing
+  | otherwise = Just (NonEmptyText t)
 type Board = [Codeword]
-type Password = T.Text
 
 instance Eq UserID where
   (==) (UserID a) (UserID b) = a == b
@@ -58,7 +66,7 @@ data GameState
   deriving (Eq, Show)
 
 data User
-  = User { _name :: T.Text
+  = User { _name :: NonEmptyText
          , _userID :: UserID
          }
   deriving (Eq, Show)
@@ -110,7 +118,7 @@ data Codeword
   deriving (Eq, Show)
 
 data Clue
-  = Clue { _hint :: T.Text
+  = Clue { _hint :: NonEmptyText
          , _relatedWords :: Int
          , _guessesLeft :: Int
          }
@@ -128,12 +136,22 @@ data RoomChatMessage
                     }
                     deriving (Eq, Show)
 
---TODO: Limit what the front end can see
+-- TODO: Tailor Gamestate to player's role
+data ClientRoom
+  = ClientRoom { _clientRAdminID :: UserID
+               , _clientRChat :: [RoomChatMessage]
+               , _clientRGameState :: Maybe GameState
+               , _clientRName :: NonEmptyText
+               , _clientRPassReq :: Bool
+               , _clientRPlayers :: NonEmpty User
+               }
+               deriving (Eq, Show)
+
 data Room
   = Room { _roomAdminID :: UserID
          , _roomChat :: [RoomChatMessage]
-         , _roomName :: T.Text
-         , _roomPassword :: Maybe T.Text
+         , _roomName :: NonEmptyText
+         , _roomPassword :: Maybe NonEmptyText
          , _roomPlayers :: NonEmpty User
          , _roomGameState :: Maybe GameState
          }
@@ -154,6 +172,8 @@ deriveJSON defaultOptions ''Ownership
 deriveJSON defaultOptions ''TurnPhase
 deriveJSON defaultOptions ''Clue
 deriveJSON defaultOptions ''CardsLeft
+deriveJSON defaultOptions ''ClientRoom
+deriveJSON defaultOptions ''NonEmptyText
 
 makeLenses ''Codeword
 makeLenses ''GameState
@@ -162,6 +182,7 @@ makeLenses ''User
 makeLenses ''TeamGuessers
 makeLenses ''TeamListeners
 makeLenses ''TeamSpeakers
+makeLenses ''ClientRoom
 
 tryStartGame :: User -> GameState -> Room -> Room
 tryStartGame u gs r@Room{..}
@@ -178,7 +199,7 @@ swapAtIndices indexX indexY list = setAt indexY x $ setAt indexX y list
 makeCodeword :: Ownership -> T.Text -> Codeword
 makeCodeword o w = Codeword w o False
 
-makeNewRoom :: User -> T.Text -> Maybe Password -> Room
+makeNewRoom :: User -> NonEmptyText -> Maybe NonEmptyText -> Room
 makeNewRoom u n p = Room (_userID u) [] n p (pure u) Nothing
 
 randomizeList :: Show a => [a] -> IO [a]
@@ -274,7 +295,7 @@ newTurn gs@GameState{..} pGen = do
   let newTeam = switchTeam _currentTurn
       (newGS, newGen) = case newTeam of
         Blue ->
-          let (newG, newLs, nGen) = switchGuesser
+          let (newG, newLs, nGen) = switchRoleUser
                 (_blueGuesser $ _guessers)
                 (_blueListeners $ _listeners) pGen
           in
@@ -282,7 +303,7 @@ newTurn gs@GameState{..} pGen = do
              & listeners.blueListeners.~ newLs
            , nGen)
         Red ->
-          let (newG, newLs, nGen) = switchGuesser
+          let (newG, newLs, nGen) = switchRoleUser
                 (_redGuesser $ _guessers)
                 (_redListeners $ _listeners) pGen
           in
@@ -297,15 +318,15 @@ newTurn gs@GameState{..} pGen = do
 
   (gs', newGen)
 
-switchGuesser :: UserID -> Set UserID -> StdGen
+switchRoleUser :: UserID -> Set UserID -> StdGen
   -> (UserID, Set UserID, StdGen)
-switchGuesser oldG ls gen =
+switchRoleUser oldUID ls gen =
   let (rNum, newGen) = randomR (0, (S.size ls) - 1) gen
-      nextG = ls ^? to S.toList . ix (rNum)
+      nextUID = ls ^? to S.toList . ix (rNum)
   in
-  case nextG of
-    Just p -> (p, S.insert oldG $ S.delete p ls, newGen)
-    Nothing -> (oldG, ls, gen)
+  case nextUID of
+    Just p -> (p, S.insert oldUID $ S.delete p ls, newGen)
+    Nothing -> (oldUID, ls, gen)
 
 makeNewTurn :: Ownership -> GameState -> TurnPhase -> StdGen
   -> (GameState, StdGen)
@@ -324,3 +345,57 @@ checkWinner _ gs =
   where checkCards (CardsLeft 0 _) = Just Blue
         checkCards (CardsLeft _ 0) = Just Red
         checkCards _ = Nothing
+
+data RoleStatus
+  = NotAnyRole
+  | SpeakerFor Team
+  | GuesserFor Team
+  | ListenerFor Team
+
+getRoleStatus :: GameState -> UserID -> RoleStatus
+getRoleStatus gs uID
+  | uID == (_blueSpeaker $ _speakers gs) = SpeakerFor Blue
+  | uID == (_redSpeaker $ _speakers gs) = SpeakerFor Red
+  | uID == (_blueGuesser $ _guessers gs) = GuesserFor Blue
+  | uID == (_redGuesser $ _guessers gs) = GuesserFor Red
+  | elem uID $ _blueListeners $ _listeners gs = ListenerFor Blue
+  | elem uID $ _redListeners $ _listeners gs = ListenerFor Red
+  | otherwise = NotAnyRole
+
+makeNewRole :: GameState -> UserID -> RoleStatus
+  -> StdGen -> (GameState, StdGen)
+makeNewRole
+  gameState@(GameState cL cT gB gs@(Guessers bG rG) (Listeners bLs rLs) ss@(Speakers bS rS) tP w)
+  uID uRole gen =
+    case uRole of
+      GuesserFor t -> do
+        let (newGs, newLs, newGen) =
+              case t of
+                Blue -> f (switchRoleUser uID bLs gen) t
+                Red -> f (switchRoleUser uID rLs gen) t
+        (GameState cL cT gB newGs newLs ss tP w, newGen)
+
+      SpeakerFor t -> do
+        let (newSs, newLs, newGen) =
+              case t of
+                Blue -> f' (switchRoleUser uID bLs gen) t
+                Red -> f' (switchRoleUser uID rLs gen) t
+        (GameState cL cT gB gs newLs newSs tP w, newGen)
+
+      ListenerFor t -> do
+        let newLs =
+              case t of
+                Blue -> Listeners (S.filter ((/=) uID) bLs) rLs
+                Red -> Listeners bLs (S.filter ((/=) uID) rLs)
+        (GameState cL cT gB gs newLs ss tP w, gen)
+      NotAnyRole -> (gameState, gen)
+
+  where f (newBG, blueLs, stdG) Blue = ((Guessers newBG rG)
+          , Listeners (S.filter ((/=) uID) blueLs) rLs, stdG)
+        f (newRG, redLs, stdG) Red = ((Guessers bG newRG)
+          , Listeners bLs (S.filter ((/=) uID) redLs), stdG)
+
+        f' (newBS, blueLs, stdG) Blue = ((Speakers newBS rS)
+          , Listeners (S.filter ((/=) uID) blueLs) rLs, stdG)
+        f' (newRS, redLs, stdG) Red = ((Speakers bS newRS)
+          , Listeners bLs (S.filter ((/=) uID) redLs), stdG)

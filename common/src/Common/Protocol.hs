@@ -7,16 +7,15 @@ import Common.Codewords
 import Control.Lens
 import Data.Aeson.TH
 import Data.IntMap
-import Data.Text (Text)
 
 data ClientMsg
-  = CreateName Text
-  | CreateRoom Text (Maybe Password)
-  | ChangeRoomName Int Text
+  = CreateName NonEmptyText
+  | CreateRoom NonEmptyText (Maybe NonEmptyText)
+  | ChangeRoomName Int NonEmptyText
   | ChangeGameState Int Codeword
   | EndGame Int
   | EndTurn Int
-  | JoinRoom Int
+  | JoinRoom Int (Maybe NonEmptyText)
   | LeaveRoom Int
   | SendClue Int Clue
   | SendRoomChatMsg Int RoomChatMessage
@@ -28,11 +27,12 @@ data ServerMsg
   | GameStateChanged Int
   | GameEnded Int
   | NameCreated User
-  | RoomCreated Int Room
-  | RoomChanged Int Room
+  | PasswordInvalid Int
+  | RoomCreated Int ClientRoom
+  | RoomChanged Int ClientRoom
   | RoomDeleted Int
   | RoomJoined Int
-  | RoomList (IntMap Room)
+  | RoomList (IntMap ClientRoom)
   | LeftRoom User
 
 deriveJSON defaultOptions ''ClientMsg

@@ -22,9 +22,9 @@ import Data.Aeson
 import Data.Bool (bool)
 import Data.IntMap as M
 import Data.List as L (filter)
+import Data.Maybe (isJust)
 import qualified Data.List.NonEmpty as NE
   ((<|), filter, length, nonEmpty, toList, last)
-import qualified Data.Text as T
 
 import Network.WebSockets
 import Network.WebSockets.Snap
@@ -47,8 +47,12 @@ data ServerState
           , pureGen :: TVar StdGen
           }
 
+--TODO: Make system its own type, also can remove restriction for name creation
 systemUser :: User
-systemUser = User ("SYSTEM" :: T.Text) (UserID (-1))
+systemUser = User (NonEmptyText "SYSTEM") (UserID (-1))
+
+toClientRoom :: Room -> ClientRoom
+toClientRoom (Room aID c n mP ps gs) = ClientRoom aID c gs n (isJust mP) ps
 
 handleNewConnection :: Maybe User -> ServerState -> Connection -> IO ()
 handleNewConnection mUser state connection = do
@@ -77,7 +81,7 @@ handleWebsocket s p = do
   forkIO $ handleTChanComms fullConnection bc
 
   roomIntMap <- atomically $ readTVar (rooms s)
-  sendFn (RoomList roomIntMap)
+  sendFn (RoomList $ toClientRoom <$> roomIntMap)
 
   handleNewConnection Nothing s fullConnection
   return ()
@@ -100,17 +104,27 @@ handleClosedConnection mUser s = do
             let hasMinPlayers = enoughPlayers mRoom
 
             case mRoom of
-              Just _ -> do
-                bool (endGame s rID) (return ()) hasMinPlayers
+              Just r -> do
+                case _roomGameState r of
+                  Just gs -> do
+                    bool (endGame s rID) (f rID (_userID u) gs) hasMinPlayers
+                    return ()
+                  Nothing -> return ()
+
                 tryUpdateRoom (rooms s) (broadcast s) rID
                   $ appendRoomChatMsg $ RoomChatMessage systemUser (
-                    (_name u) <> " has left the room."
+                    (getNonEmptyText $ _name u) <> " has left the room."
                   )
                 return ()
               Nothing -> return ()
           Nothing -> return ()
       Nothing -> return ()
 
+  where f rID uID gs = do
+          newGS <- atomically $ stateTVar (pureGen s) $ \pGen ->
+            makeNewRole gs uID (getRoleStatus gs uID) pGen
+          tryUpdateRoom (rooms s) (broadcast s) rID $ updateRoomGameState newGS
+          return ()
 
 handleClientMsg :: ServerState -> Maybe User -> ClientMsg
   -> (ServerMsg -> IO ()) -> Connection -> IO (Maybe User)
@@ -131,14 +145,15 @@ handleClientMsg state mUser cMsg sendFn connection = do
       case mUser of
         Just u -> do
           let newRoom = makeNewRoom u n pass
+              newClientRoom = toClientRoom newRoom
           roomID <- atomically $ stateTVar (rooms state) (addRoom newRoom)
-          atomically $ writeTChan (broadcast state) (RoomChanged roomID newRoom)
-          sendFn (RoomCreated roomID newRoom)
+          atomically $ writeTChan (broadcast state) (RoomChanged roomID newClientRoom)
+          sendFn (RoomCreated roomID newClientRoom)
         Nothing ->
           return ()
       return mUser
 
-    JoinRoom roomID -> do
+    JoinRoom roomID _ -> do
 
       case mUser of
         Just u -> do
@@ -147,7 +162,7 @@ handleClientMsg state mUser cMsg sendFn connection = do
           case mRoom of
             Just _ -> do
               updateFn roomID $ appendRoomChatMsg $ RoomChatMessage systemUser (
-                  (_name u) <> " has joined the room."
+                  (getNonEmptyText $ _name u) <> " has joined the room."
                 )
               sendFn (RoomJoined roomID)
             Nothing ->
@@ -167,7 +182,7 @@ handleClientMsg state mUser cMsg sendFn connection = do
           case mRoom of
             Just _ -> do
               updateFn roomID $ appendRoomChatMsg $ RoomChatMessage systemUser (
-                  (_name u) <> " has left the room."
+                  (getNonEmptyText $ _name u) <> " has left the room."
                 )
               return ()
             Nothing ->
@@ -190,7 +205,7 @@ handleClientMsg state mUser cMsg sendFn connection = do
             True -> do
               mRoom' <- updateFn roomID $ appendRoomChatMsg $
                 RoomChatMessage systemUser $
-                  (_name u) <> " has started the game."
+                  (getNonEmptyText $ _name u) <> " has started the game."
 
               case mRoom' of
                 Just r -> do
@@ -306,7 +321,7 @@ endGame state roomID = do
       sendUsersServerMsg rPlayers (GameEnded roomID)
         usConnected
 
-      sendUsersServerMsg rPlayers (RoomChanged roomID r')
+      sendUsersServerMsg rPlayers (RoomChanged roomID $ toClientRoom r')
         usConnected
       return ()
 
@@ -356,7 +371,7 @@ tryUpdateRoom rTVar broadcastChan rID fn = do
 
       case mRoom of
         Just room ->
-          atomically $ writeTChan broadcastChan (RoomChanged rID room)
+          atomically $ writeTChan broadcastChan (RoomChanged rID $ toClientRoom room)
         Nothing -> do
           putStrLn "Could not apply fn to update room."
           return ()
@@ -433,7 +448,7 @@ updateRoomGameState gs r@Room{..} = r {_roomGameState = Just gs}
 changeToLobby :: Room -> Room
 changeToLobby r@Room{..} = r {_roomGameState = Nothing}
 
-changeRoomName :: T.Text -> Room
+changeRoomName :: NonEmptyText -> Room
   -> Room
 changeRoomName newName r@Room{..} = r {_roomName = newName}
 

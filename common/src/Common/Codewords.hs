@@ -16,6 +16,9 @@ import qualified Data.Set as S
 
 import System.Random
 
+defaultPasswordSymbols :: T.Text
+defaultPasswordSymbols = "•••••••"
+
 testWords :: [T.Text]
 testWords = ["Apple", "Blue", "Code", "Dart", "Ear", "Fart", "Green"
             , "Horn", "Italy", "Joker", "Kart", "Lift", "Maroon"
@@ -147,6 +150,11 @@ data ClientRoom
                }
                deriving (Eq, Show)
 
+data ClientPassword
+  = ClientPassword { _passChanged :: Bool
+                   , _mPassword :: Maybe NonEmptyText
+                   }
+                   deriving (Eq, Show)
 data Room
   = Room { _roomAdminID :: UserID
          , _roomChat :: [RoomChatMessage]
@@ -173,6 +181,7 @@ deriveJSON defaultOptions ''TurnPhase
 deriveJSON defaultOptions ''Clue
 deriveJSON defaultOptions ''CardsLeft
 deriveJSON defaultOptions ''ClientRoom
+deriveJSON defaultOptions ''ClientPassword
 deriveJSON defaultOptions ''NonEmptyText
 
 makeLenses ''Codeword
@@ -183,6 +192,7 @@ makeLenses ''TeamGuessers
 makeLenses ''TeamListeners
 makeLenses ''TeamSpeakers
 makeLenses ''ClientRoom
+makeLenses ''ClientPassword
 
 tryStartGame :: User -> GameState -> Room -> Room
 tryStartGame u gs r@Room{..}

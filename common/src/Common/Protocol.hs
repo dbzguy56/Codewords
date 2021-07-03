@@ -11,7 +11,7 @@ import Data.IntMap
 data ClientMsg
   = CreateName NonEmptyText
   | CreateRoom NonEmptyText (Maybe NonEmptyText)
-  | ChangeRoomName Int NonEmptyText
+  | ChangeRoomInfo Int NonEmptyText ClientPassword
   | ChangeGameState Int Codeword
   | EndGame Int
   | EndTurn Int
@@ -27,7 +27,7 @@ data ServerMsg
   | GameStateChanged Int
   | GameEnded Int
   | NameCreated User
-  | PasswordInvalid Int
+  | PasswordInvalid User Int
   | RoomCreated Int ClientRoom
   | RoomChanged Int ClientRoom
   | RoomDeleted Int

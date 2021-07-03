@@ -153,18 +153,16 @@ handleClientMsg state mUser cMsg sendFn connection = do
           return ()
       return mUser
 
-    JoinRoom roomID _ -> do
-
+    JoinRoom roomID mPass -> do
       case mUser of
         Just u -> do
-          mRoom <- updateFn roomID $ appendUserToRoom u
-
+          mRoom <- roomExist (rooms state) roomID
           case mRoom of
-            Just _ -> do
-              updateFn roomID $ appendRoomChatMsg $ RoomChatMessage systemUser (
-                  (getNonEmptyText $ _name u) <> " has joined the room."
-                )
-              sendFn (RoomJoined roomID)
+            Just r -> do
+              case (_roomPassword r) of
+                Just p -> bool (sendFn (PasswordInvalid u roomID))
+                  (joinRoom state roomID u sendFn) (equivalentPasswords mPass p)
+                Nothing -> joinRoom state roomID u sendFn
             Nothing ->
               return ()
         Nothing ->
@@ -173,7 +171,6 @@ handleClientMsg state mUser cMsg sendFn connection = do
       return mUser
 
     LeaveRoom roomID -> do
-
       case mUser of
         Just u -> do
           mRoom <- removeUserOrRoom (rooms state) (broadcast state) roomID $
@@ -290,14 +287,34 @@ handleClientMsg state mUser cMsg sendFn connection = do
         Nothing -> return ()
       return mUser
 
-    ChangeRoomName roomID newRoomName -> do
+    ChangeRoomInfo roomID newRoomName cPassword -> do
       mRoom <- roomExist (rooms state) roomID
       case mRoom of
         Just _ -> do
           updateFn roomID $ changeRoomName newRoomName
+          case cPassword of
+            (ClientPassword True newMPass@(Just _)) -> do
+              updateFn roomID $ changeRoomPass newMPass
+              return ()
+            _ -> return ()
           return ()
         Nothing -> return ()
       return mUser
+
+joinRoom :: ServerState -> Int -> User
+  -> (ServerMsg -> IO ()) -> IO ()
+joinRoom state roomID u sendFn = do
+  let updateFn = tryUpdateRoom (rooms state) (broadcast state)
+  updateFn roomID $ appendUserToRoom u
+  updateFn roomID $
+    appendRoomChatMsg $ RoomChatMessage systemUser (
+      (getNonEmptyText $ _name u) <> " has joined the room."
+    )
+  sendFn (RoomJoined roomID)
+
+equivalentPasswords :: Maybe NonEmptyText -> NonEmptyText -> Bool
+equivalentPasswords (Just p') p = (==) p p'
+equivalentPasswords Nothing _ = False
 
 ifGuessingPhase :: Maybe Team -> TurnPhase -> Bool
 ifGuessingPhase Nothing (Guessing _) = True
@@ -451,6 +468,11 @@ changeToLobby r@Room{..} = r {_roomGameState = Nothing}
 changeRoomName :: NonEmptyText -> Room
   -> Room
 changeRoomName newName r@Room{..} = r {_roomName = newName}
+
+-- TODO: should we send admin the pass so the dialog can have original pass and they dont have to type in each time?
+changeRoomPass :: Maybe NonEmptyText -> Room
+  -> Room
+changeRoomPass newPass r@Room{..} = r {_roomPassword = newPass}
 
 appendRoomChatMsg :: RoomChatMessage -> Room -> Room
 appendRoomChatMsg rChatMsg r = addMsg r

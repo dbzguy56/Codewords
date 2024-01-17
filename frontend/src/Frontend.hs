@@ -1,4 +1,5 @@
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
@@ -44,12 +45,10 @@ import qualified GHCJS.DOM.Location as Location
 import Reflex.Dom.Core
 
 type CodewordsM t m = ( DomBuilder t m , PostBuild t m , TriggerEvent t m
-                      , HasJSContext (Performable m)
                       , MonadJSM m, MonadHold t m, MonadFix m
                       , DomBuilderSpace m ~ GhcjsDomSpace, MonadJSM (Performable m)
                       , MonadIO (Performable m), PerformEvent t m
                       , MonadSample t (Performable m)
-                      , HasWebView m
                       )
 
 
@@ -809,7 +808,7 @@ frontend = Frontend
 
       elAttr "link" ("href" =: "https://unpkg.com/tailwindcss@^2/dist/tailwind.min.css"
         <> "type" =: "text/css" <> "rel" =: "stylesheet") blank
-      elAttr "link" ("href" =: static @"main.css" <> "type" =: "text/css"
+      elAttr "link" ("href" =: $(static "main.css") <> "type" =: "text/css"
         <> "rel" =: "stylesheet") blank
 
       elAttr "meta" ("name" =: "viewport" <> "content" =: "width=device-width, \

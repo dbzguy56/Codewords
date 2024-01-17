@@ -460,19 +460,19 @@ removeUserFromRoom u r = do
 
 updateRoomGameState :: GameState -> Room
   -> Room
-updateRoomGameState gs r@Room{..} = r {_roomGameState = Just gs}
+updateRoomGameState gs r@Room{} = r {_roomGameState = Just gs}
 
 changeToLobby :: Room -> Room
-changeToLobby r@Room{..} = r {_roomGameState = Nothing}
+changeToLobby r@Room{} = r {_roomGameState = Nothing}
 
 changeRoomName :: NonEmptyText -> Room
   -> Room
-changeRoomName newName r@Room{..} = r {_roomName = newName}
+changeRoomName newName r@Room{} = r {_roomName = newName}
 
 -- TODO: should we send admin the pass so the dialog can have original pass and they dont have to type in each time?
 changeRoomPass :: Maybe NonEmptyText -> Room
   -> Room
-changeRoomPass newPass r@Room{..} = r {_roomPassword = newPass}
+changeRoomPass newPass r@Room{} = r {_roomPassword = newPass}
 
 appendRoomChatMsg :: RoomChatMessage -> Room -> Room
 appendRoomChatMsg rChatMsg r = addMsg r

@@ -112,7 +112,7 @@ showMsgs msg = do
 roomChatWidget :: CodewordsM t m => Int -> User -> Dynamic t (Maybe GameState)
   -> Dynamic t [RoomChatMessage] -> m (Event t ClientMsg)
 roomChatWidget n u dmGS dRC = do
-  elClass "div" "bg-gray-300 flex flex-col-reverse h-1/3 lg:h-full overflow-auto" $
+  elClass "div" "bg-gray-300 flex flex-col-reverse h-full overflow-auto" $
     elClass "div" "flex flex-col-reverse break-all" $
       simpleList dRC (\rChat -> do
         el "div" $ do
@@ -380,8 +380,8 @@ displaySpeakerView n dGB = do
 
     guesses <- elClass "div" "" $ do
       elClass "div" "" $ text "RELATED WORDS TO HINT"
-      g <- elClass "div" "flex" $ mdo
-        dInt' <- elClass "div" "bg-gray-50 rounded-md" $ do
+      g <- elClass "div" "flex justify-center" $ mdo
+        dInt' <- elClass "div" "flex items-center text-5xl bg-gray-50 text-center" $ do
           dInt <- foldDyn ($) (1 :: Int) bClicked
           display dInt
           return dInt
@@ -476,7 +476,7 @@ turnPhaseMsg dGS dPs = do
     (Guessing (Clue h rWords _)) -> do
       elClass "span" "flex justify-between w-full px-2" $ do
         el "div" $ do
-          elClass "span" "color-red-600" $ text $ "HINT: " <> (getNonEmptyText h)
+          elClass "span" "text-yellow-500" $ text $ "HINT: " <> (getNonEmptyText h)
 
         el "div" $ do
           text "Guesser: "
@@ -487,7 +487,7 @@ turnPhaseMsg dGS dPs = do
             Nothing ->
               el "div" $ text "Cannot find Guesser"
 
-        el "div" $ text $ "RELATED WORDS: " <> tShow rWords
+        elClass "div" "text-green-500" $ text $ "RELATED WORDS: " <> tShow rWords
 
 teamColor :: Team -> T.Text
 teamColor Blue = "text-blue-600"
@@ -505,7 +505,7 @@ openRoomInfoDialog eToggle n (NonEmptyText initialRoomName) = mdo
 -- TODO: inputs clear most times
   eClose <- elDynClass "div" (mkStyles <$> dOpen) $ mdo
     latestBtnE <- elClass "div" "bg-red-500 w-1/2 h-1/2" $ do
-      roomNameIE <- inputMNonEmptyTextBox "" initialRoomName latestBtnE
+      roomNameIE <- inputMNonEmptyTextBox "" initialRoomName "" latestBtnE
       passwordIE <- inputPasswordWidget "Room Pass: " ""
         defaultPasswordSymbols latestBtnE
       let btnStyles = "ml-2 px-1 bg-gray-600 rounded-lg"
@@ -544,9 +544,6 @@ displayRoom n r u v = do
   elClass "div" "flex flex-col h-screen select-none" $ do
     let rAdminID = fmap _clientRAdminID r'
     let adminStatus = isUserAdmin rAdminID (return u)
-    elClass "div" "flex justify-center bg-gray-700 xl:h-16 \
-      \ 2xl:h-8 rounded lg:text-5xl" $
-      text "GET UR BEEG YOSHI HERE"
 
     displayTopMessageBar r'
 
@@ -559,7 +556,7 @@ displayRoom n r u v = do
                 dynText $ fmap (\room -> ("Room: " <> getNonEmptyText (_clientRName room))) r'
                 displayIfAdmin adminStatus (handleChangeRoomInfo n r') (return never)
 
-              elClass "div" "lg:px-10 2xl:px-3 bg-gray-600 rounded-full" $ text "?"
+              --elClass "div" "lg:px-10 2xl:px-3 bg-gray-600 rounded-full" $ text "?"
               return eRN
 
             displayRoomUsers rAdminID (fmap _clientRPlayers r')
@@ -582,7 +579,7 @@ displayRoom n r u v = do
             clientMsg <- gameBoardWidget n adminStatus r' u
             return clientMsg
 
-      cMsg <- elClass "div" "flex flex-col h-full lg:w-1/4" $ do
+      cMsg <- elClass "div" "flex flex-col h-full md:w-1/4" $ do
         displaySideBar n u r'
 
       return $ leftmost [cMsg, btn]
@@ -602,27 +599,30 @@ displayIfAdmin adminStatus adminAction defAction
 displayRoomCard :: CodewordsM t m => Dynamic t (Int, ClientRoom)
   -> Maybe Int -> m (Event t ClientMsg)
 displayRoomCard dR mRID = do
-  let dRID = fst <$> dR
-      dRName = (_clientRName.snd) <$> dR
-  e <- dyn $ ffor (_clientRPassReq.snd <$> dR) $ \case
-    False ->
-      elClass "div" "" $ do
-        elClass' "span" "" $ dynText (getNonEmptyText <$> dRName)
-        (btnE, _) <- elClass' "button" "bg-gray-200" $ text "Join"
-        return $ tag (current ((flip JoinRoom Nothing) <$> dRID)) $ domEvent Click btnE
-    True -> do
-      --let dStyle = bool ("") ("ring-2 ring-red-500") <$>
-      --      ((f' mRID) <$> dRID)
-      elClass "div" "" $ mdo
-        --elAttr "img" ("src" =: static @"lockSymbol.svg") blank
-        elClass "span" "" $ dynText (getNonEmptyText <$> dRName)
-        dPass <- inputMNEPassword "" "" $ domEvent Click btnE--dStyle
-        (btnE, _) <- elClass' "button" "bg-gray-200" $ text "Join"
-        dyn_ $ bool (return ()) (elClass "span" "bg-red-200" $ text "Password is invalid") <$>
-          ((f' mRID) <$> dRID)
-        let dMClientMsg = f <$> dRID <*> (_mPassword <$> dPass)
-            dMsg = fmapMaybe id $ tag (current dMClientMsg) $ domEvent Click btnE
-        return dMsg
+  e <- elClass "div" "bg-gray-400 p-4 rounded-lg" $ do
+    let dRID = fst <$> dR
+        dRName = (_clientRName.snd) <$> dR
+        joinBtn = elClass' "button" "bg-gray-200 rounded-sm" $ text "Join"
+        divStyle = "flex flex-row gap-x-2 flex-wrap"
+    dyn $ ffor (_clientRPassReq.snd <$> dR) $ \case
+      False ->
+        elClass "div" divStyle $ do
+          elClass' "span" "" $ dynText (getNonEmptyText <$> dRName)
+          (btnE, _) <- joinBtn
+          return $ tag (current ((flip JoinRoom Nothing) <$> dRID)) $ domEvent Click btnE
+      True -> do
+        --let dStyle = bool ("") ("ring-2 ring-red-500") <$>
+        --      ((f' mRID) <$> dRID)
+        elClass "div" divStyle $ mdo
+          --elAttr "img" ("src" =: static @"lockSymbol.svg") blank
+          elClass "span" "" $ dynText (getNonEmptyText <$> dRName)
+          dPass <- inputMNEPassword "" "" $ domEvent Click btnE--dStyle
+          (btnE, _) <- joinBtn
+          dyn_ $ bool (return ()) (elClass "span" "bg-red-200" $ text "Password is invalid") <$>
+            ((f' mRID) <$> dRID)
+          let dMClientMsg = f <$> dRID <*> (_mPassword <$> dPass)
+              dMsg = fmapMaybe id $ tag (current dMClientMsg) $ domEvent Click btnE
+          return dMsg
   e' <- switchHold never e
   return e'
   where f :: Int -> Maybe NonEmptyText -> Maybe ClientMsg
@@ -660,7 +660,7 @@ roomsWidget rList e deleteEvent =
 roomListWidget :: CodewordsM t m => Dynamic t (IntMap ClientRoom)
   -> Maybe Int -> m (Event t ClientMsg)
 roomListWidget rList mRID = do
-  eList  <- el "div" $ simpleList (fmap M.toList rList) (flip displayRoomCard mRID)
+  eList  <- elClass "div" "flex flex-col gap-y-2 overflow-y-auto" $ simpleList (fmap M.toList rList) (flip displayRoomCard mRID)
   return $ (switchDyn $ leftmost <$> eList)
 
 ----- INPUT TEXTBOX FNS
@@ -668,20 +668,21 @@ roomListWidget rList mRID = do
 inputPasswordWidget :: CodewordsM t m => T.Text -> T.Text
   -> T.Text -> Event t a -> m (Dynamic t ClientPassword)
 inputPasswordWidget label style initialValue eClear = do
-  checkE' <- el "div" $ do
+  checkE' <- elClass "div" "py-2" $ do
     checkE <- inputElement $ def
       & inputElementConfig_elementConfig
       . elementConfig_initialAttributes
       .~ ("autofocus" =: "" <> "style" =: style
         <> "type" =: "checkbox")
-    text "Require a password"
+    elClass "span" "pl-2" $ text "Require a password"
     return checkE
   let dChecked = _inputElement_checked checkE'
   -- eDCP :: Event t (Dynamic t ClientPassword)
   eDCP <- dyn $ ffor dChecked $ \case
     True -> do
-      el "span" $ text label
-      inputMNEPassword style initialValue eClear
+      elClass "div" "flex flex-row py-2" $ do
+        elClass "span" "pr-2" $ text label
+        inputMNEPassword style initialValue eClear
     False -> return $ constDyn (ClientPassword False Nothing)
   join <$> holdDyn (constDyn $ ClientPassword False Nothing) eDCP
 
@@ -692,7 +693,7 @@ inputMNEPassword style initialValue eClear = do
     & inputElementConfig_elementConfig
     . elementConfig_initialAttributes
     .~ ("autofocus" =: "" <> "style" =: style
-      <> "placeholder" =: "Type something here..."
+      <> "placeholder" =: "Type password here..."
       <> "type" =: "password")
     & inputElementConfig_setValue .~ (initialValue <$ eClear)
 
@@ -702,27 +703,27 @@ inputMNEPassword style initialValue eClear = do
     <*> (mkNonEmptyText <$> iEValue)
 
 
-inputMNonEmptyTextBoxLabel :: CodewordsM t m => T.Text
+inputMNonEmptyTextBoxLabel :: CodewordsM t m => T.Text -> T.Text
   -> T.Text -> Event t a -> m (Dynamic t (Maybe NonEmptyText))
-inputMNonEmptyTextBoxLabel labelName style eClear = do
+inputMNonEmptyTextBoxLabel labelName style placeholder eClear = do
   elClass "div" "flex flex-col" $ do
     el "span" $ text labelName
-    inputMNonEmptyTextBox style "" eClear
+    inputMNonEmptyTextBox style "" placeholder eClear
 
-inputMNonEmptyTextBox :: CodewordsM t m => T.Text
+inputMNonEmptyTextBox :: CodewordsM t m => T.Text -> T.Text
   -> T.Text -> Event t a -> m (Dynamic t (Maybe NonEmptyText))
-inputMNonEmptyTextBox style initialValue eClear = do
-  (elVal, _) <- inputTextBox style initialValue eClear
+inputMNonEmptyTextBox style initialValue placeholder eClear = do
+  (elVal, _) <- inputTextBox style initialValue placeholder eClear
   return $ mkNonEmptyText <$> elVal
 
-inputTextBox :: CodewordsM t m => T.Text -> T.Text -> Event t a
+inputTextBox :: CodewordsM t m => T.Text -> T.Text -> T.Text -> Event t a
   -> m (Dynamic t T.Text, Event t ())
-inputTextBox style initialValue eClear = do
+inputTextBox style initialValue placeholder eClear = do
   iE <- inputElement $ def
     & inputElementConfig_elementConfig
     . elementConfig_initialAttributes
     .~ ("autofocus" =: "" <> "style" =: style
-      <> "placeholder" =: "Type something here...")
+      <> "placeholder" =: placeholder)
     & inputElementConfig_setValue .~ (initialValue <$ eClear)
   return (_inputElement_value iE,
     keypress Enter (_inputElement_element iE))
@@ -730,7 +731,7 @@ inputTextBox style initialValue eClear = do
 inputTextBoxBtnWidget :: CodewordsM t m
   => T.Text -> T.Text -> m (Event t T.Text)
 inputTextBoxBtnWidget btnText style = mdo
-  (elVal, enter) <- inputTextBox style "" send
+  (elVal, enter) <- inputTextBox style "" "Send a message" send
   (e, _) <- elClass' "button" "bg-gray-100" $ text btnText
 
   let clicked = domEvent Click e
@@ -743,32 +744,35 @@ inputTextBoxBtnWidget btnText style = mdo
 
 signInWidget :: CodewordsM t m => m (Event t ClientMsg)
 signInWidget = do
-  nonEmptyText' <- elClass "div" "flex items-center h-full w-full" $ do
-    --elClass "div" "flex-auto h-full " $ text "ADS"
-    nonEmptyText <- elClass "div" "h-full flex-col flex-auto text-5xl bg-gray-100" $ do
-      elClass "div" "rounded-lg bg-gray-500" $ do
-        dMNonEmptyText <- inputMNonEmptyTextBox "" "" never
-        (btnE, _) <- elClass' "button" "bg-gray-200" $ text "Create User"
-        let eventNonEmptyText = fmapMaybe id $ tag (current dMNonEmptyText) $ domEvent Click btnE
-        return $ eventNonEmptyText
-    --elClass "div" "h-full flex-auto" $ text "ADS"
-    return nonEmptyText
-  return $ CreateName <$> nonEmptyText'
+  nonEmptyText <- elClass "div" "flex flex-col justify-center w-screen h-screen text-5xl bg-gray-400" $ do
+    elClass "div" "flex flex-col self-center w-3/4 p-8 rounded-lg bg-gray-500" $ do
+      dMNonEmptyText <- inputMNonEmptyTextBox "" "" "Create a user name..." never
+      (btnE, _) <- elClass' "button" "bg-gray-200" $ text "Create User"
+      let eventNonEmptyText = fmapMaybe id $ tag (current dMNonEmptyText) $ domEvent Click btnE
+      return $ eventNonEmptyText
+  return $ CreateName <$> nonEmptyText
 
 homeViewWidget :: CodewordsM t m => Dynamic t (IntMap ClientRoom) -> User
   -> Maybe Int -> m (Event t ClientMsg)
 homeViewWidget rList u mRID = do
-  el "div" $ text $ "Welcome " <> (getNonEmptyText $ _name u) <> " ID: " <> tShow (_userID u)
-  dMName <- inputMNonEmptyTextBoxLabel "Room Name: " "" never
-  dMCPass <- inputPasswordWidget "Room Pass: " "" "" never
-  (btnE, _) <- elClass' "button" "bg-gray-200" $ text "Create Room"
+  elClass "div" "flex flex-col mx-16 gap-y-4 max-h-screen" $ do
+    elClass "div" "flex self-center py-2 text-5xl font-bold" $ text $ "Welcome " <> (getNonEmptyText $ _name u) -- <> " ID: " <> tShow (_userID u)
+    dMsg' <- elClass "div" "flex flex-col p-8 text-2xl bg-gray-500 rounded-lg" $ do
+      elClass "div" "text-3xl pb-2 font-semibold" $ text "Create a new room:"
+      dMName <- inputMNonEmptyTextBoxLabel "" "" "Enter a room name..." never
+      dMCPass <- inputPasswordWidget "Room Pass: " "" "" never
+      (btnE, _) <- elClass' "button" "bg-gray-200 rounded-lg font-semibold" $ text "Create Room"
 
 
-  let dMMsg = liftA2 f dMName (_mPassword <$> dMCPass)
-      dMsg = fmapMaybe id $ tag (current dMMsg) $ domEvent Click btnE
+      let dMMsg = liftA2 f dMName (_mPassword <$> dMCPass)
+          dMsg = fmapMaybe id $ tag (current dMMsg) $ domEvent Click btnE
+      return dMsg
 
-  e <- roomListWidget rList mRID
-  return $ leftmost [e, dMsg]
+    e <- elClass "div" "flex flex-col p-8 text-2xl bg-gray-500 rounded-lg overflow-y-auto" $ do
+      elClass "div" "text-3xl pb-2 font-semibold" $ text "Join a room:"
+      roomListWidget rList mRID
+
+    return $ leftmost [e, dMsg']
 
   -- in the end what we want is Maybe (CreateRoom NonEmptyText (Maybe NonEmptyText))
   where f :: Maybe NonEmptyText -> Maybe NonEmptyText -> Maybe ClientMsg
@@ -813,7 +817,7 @@ frontend = Frontend
 
       elAttr "meta" ("name" =: "viewport" <> "content" =: "width=device-width, \
         \initial-scale=1") blank
-  , _frontend_body = elClass "div" "w-screen h-screen bg-gray-500" $ do
+  , _frontend_body = elClass "div" "w-screen h-screen bg-gray-400 overflow-hidden" $ do
 
       prerender_ blank $ liftJSM $ void $ eval ("" :: T.Text)
       prerender_ blank $ mdo
